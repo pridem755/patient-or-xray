@@ -1,0 +1,37 @@
+# ---- Data & PHI-adjacent artifacts: NEVER committed ----
+*.parquet
+*.npy
+*.npz
+*.csv
+*.zip
+*.png
+*.jpg
+*.jpeg
+*.dcm
+!tests/fixtures/*.csv
+!tests/fixtures/*.parquet
+
+# ---- Model / run artifacts ----
+*.pt
+*.pth
+*.ckpt
+models/
+outputs/
+logs/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# ---- Tooling ----
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.DS_Store
+.env

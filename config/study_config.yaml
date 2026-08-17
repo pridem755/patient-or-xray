@@ -1,0 +1,17 @@
+# Single source of truth for every study constant.
+# NOTHING here is final until notebook 04 freezes it and tags v1.0-prereg.
+# Any edit changes the config_hash, which orphans artifacts built from older values.
+
+meta:
+  study: patient-or-xray
+  config_version: 0.0.1   # bump on every edit
+
+# --- to be filled in as we reason through each stage ---
+paths: {}         # Drive roots for raw_zips, metadata, cohorts, image_cache, splits, outputs
+sites: {}         # per-site metadata filenames and join keys
+cohort: {}        # filters, one-image-per-patient rule, uncertain-label policy
+labels: {}        # the 8 labels + tier assignment (primary / exploratory / secondary)
+demographics: {}  # age bins, sex categories
+splits: {}        # ratios, seed
+model: {}         # architecture, image size, optimizer, seeds, early-stopping rule
+analysis: {}      # threshold rule, standardization reference, bootstrap reps, correction
