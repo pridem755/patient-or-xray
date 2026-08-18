@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import pytest
 import yaml
@@ -51,23 +53,34 @@ def nih_row(idx, pid, findings="No Finding", view="PA", sex="M", age=50):
     }
 
 
-def write_chexpert(d, rows, valid_rows=None):
-    pd.DataFrame(rows).to_csv(d / "train.csv", index=False)
-    # valid.csv must not repeat a train patient: one image per patient is expected.
-    default_valid = [chexpert_row("09999")]
-    pd.DataFrame(valid_rows if valid_rows is not None else default_valid).to_csv(
-        d / "valid.csv", index=False
-    )
+def write_chexpert(d, rows, labels=None, label_name="report_fixed.json"):
+    """CheXpert Plus layout: metadata CSV + separate CheXbert JSONL labels."""
+    pd.DataFrame(rows).to_csv(d / "df_chexpert_plus_240401.csv", index=False)
+    lab_dir = d / "chexbert_labels"
+    lab_dir.mkdir(exist_ok=True)
+    if labels is None:
+        labels = [chexpert_label(r["path_to_image"]) for r in rows]
+    with open(lab_dir / label_name, "w") as fh:
+        for rec in labels:
+            fh.write(json.dumps(rec) + "\n")
 
 
-def chexpert_row(pid, study=1, view="AP", frontal="Frontal", sex="Female", age=60, **labels):
-    row = {
-        "Path": f"CheXpert-v1.0/train/patient{pid}/study{study}/view1_frontal.jpg",
-        "Sex": sex, "Age": age, "Frontal/Lateral": frontal, "AP/PA": view,
+def chexpert_row(pid, study=1, view="AP", frontal="Frontal", sex="Female", age=60,
+                 partition="train"):
+    return {
+        "path_to_image": f"{partition}/patient{pid}/study{study}/view1_frontal.jpg",
+        "sex": sex, "age": age, "frontal_lateral": frontal, "ap_pa": view,
+        "deid_patient_id": f"patient{pid}", "split": partition,
     }
-    for lab in CHEXPERT_LABELS:
-        row[lab] = labels.get(lab.replace(" ", "_"), 0.0)
-    return row
+
+
+def chexpert_label(path, **positives):
+    """A CheXbert record: null means 'not mentioned', not negative."""
+    rec = {"path_to_image": path}
+    rec.update({lab: None for lab in CHEXPERT_LABELS})
+    for lab, val in positives.items():
+        rec[lab.replace("_", " ")] = val
+    return rec
 
 
 def write_mimic(d, records, labels, patients):
@@ -144,6 +157,8 @@ class TestNIH:
 
 
 class TestCheXpert:
+    """CheXpert Plus: labels arrive from a JSONL file, not the metadata CSV."""
+
     def test_identifiers_parsed_from_path(self, cfg, tmp_path):
         write_chexpert(tmp_path, [chexpert_row("00001")])
         c = build_cohort("chexpert", cfg, tmp_path,
@@ -151,54 +166,89 @@ class TestCheXpert:
         assert c.iloc[0]["patient_id"] == "patient00001"
         assert c.iloc[0]["study_id"] == "patient00001/study1"
 
-    def test_lateral_is_design_exclusion_not_missing_data(self, cfg, tmp_path):
-        """A blank AP/PA on a lateral row is expected, not a data-quality problem."""
-        write_chexpert(
-            tmp_path,
-            [chexpert_row("00001", frontal="Lateral", view=None),
-             chexpert_row("00002", frontal="Frontal", view="PA")],
-            valid_rows=[chexpert_row("00003", frontal="Frontal", view="AP")],
-        )
-        res = build_cohort(
-            "chexpert", cfg, tmp_path,
-            image_manifest=["patient00001/study1/view1_frontal.jpg",
-                            "patient00002/study1/view1_frontal.jpg",
-                            "patient00003/study1/view1_frontal.jpg"],
-        )
-        outcomes = set(res.audit.outcome)
-        assert "lateral" in outcomes
-        assert "view_missing" not in outcomes
+    def test_labels_joined_from_jsonl(self, cfg, tmp_path):
+        rows = [chexpert_row("00001"), chexpert_row("00002")]
+        labels = [
+            chexpert_label(rows[0]["path_to_image"], Cardiomegaly=1.0),
+            chexpert_label(rows[1]["path_to_image"], Pleural_Effusion=1.0),
+        ]
+        write_chexpert(tmp_path, rows, labels)
+        c = build_cohort("chexpert", cfg, tmp_path, image_manifest=[
+            "patient00001/study1/view1_frontal.jpg",
+            "patient00002/study1/view1_frontal.jpg"]).cohort
+        assert c.set_index("patient_id").loc["patient00001", "Cardiomegaly"] == 1.0
+        assert c.set_index("patient_id").loc["patient00002", "Pleural Effusion"] == 1.0
 
-    def test_source_partition_retained(self, cfg, tmp_path):
-        write_chexpert(tmp_path, [chexpert_row("00001")],
-                       valid_rows=[chexpert_row("00002")])
-        res = build_cohort(
-            "chexpert", cfg, tmp_path,
-            image_manifest=["patient00001/study1/view1_frontal.jpg",
-                            "patient00002/study1/view1_frontal.jpg"],
-        )
-        assert set(res.cohort["source_partition"]) == {"train", "valid"}
+    def test_unmentioned_label_stays_missing_not_negative(self, cfg, tmp_path):
+        """null means the report did not mention it - never a negative."""
+        rows = [chexpert_row("00001")]
+        write_chexpert(tmp_path, rows,
+                       [chexpert_label(rows[0]["path_to_image"], Cardiomegaly=1.0)])
+        c = build_cohort("chexpert", cfg, tmp_path,
+                         image_manifest=["patient00001/study1/view1_frontal.jpg"]).cohort
+        assert pd.isna(c.iloc[0]["Pneumonia"])
 
-    def test_missing_configured_file_raises(self, cfg, tmp_path):
-        pd.DataFrame([chexpert_row("00001")]).to_csv(tmp_path / "train.csv", index=False)
-        with pytest.raises(CohortBuildError, match="not found"):
+    def test_unlabelled_images_counted_in_flow(self, cfg, tmp_path):
+        rows = [chexpert_row("00001"), chexpert_row("00002")]
+        write_chexpert(tmp_path, rows,
+                       [chexpert_label(rows[0]["path_to_image"])])   # second has no record
+        res = build_cohort("chexpert", cfg, tmp_path, image_manifest=[
+            "patient00001/study1/view1_frontal.jpg",
+            "patient00002/study1/view1_frontal.jpg"], min_manifest_match_rate=0.4)
+        note = res.flow.to_frame().set_index("step").loc["labels_joined", "note"]
+        assert "1 image rows had no entry" in note
+
+    def test_missing_label_file_raises(self, cfg, tmp_path):
+        pd.DataFrame([chexpert_row("00001")]).to_csv(
+            tmp_path / "df_chexpert_plus_240401.csv", index=False)
+        with pytest.raises(CohortBuildError, match="label file not found"):
             build_cohort("chexpert", cfg, tmp_path,
                          image_manifest=["patient00001/study1/view1_frontal.jpg"])
 
-    def test_malformed_path_raises(self, cfg, tmp_path):
-        rows = [chexpert_row("00001")]
-        rows[0]["Path"] = "CheXpert-v1.0/train/badly_named.jpg"
+    def test_lateral_is_design_exclusion_not_missing_data(self, cfg, tmp_path):
+        """ap_pa is blank on laterals by construction, not by omission."""
+        rows = [chexpert_row("00001", frontal="Lateral", view=None),
+                chexpert_row("00002", frontal="Frontal", view="PA")]
         write_chexpert(tmp_path, rows)
-        with pytest.raises(CohortBuildError, match="Path values"):
-            build_cohort("chexpert", cfg, tmp_path, image_manifest=["x/y/badly_named.jpg"])
+        res = build_cohort("chexpert", cfg, tmp_path, image_manifest=[
+            "patient00001/study1/view1_frontal.jpg",
+            "patient00002/study1/view1_frontal.jpg"])
+        outcomes = set(res.audit.outcome)
+        assert "lateral" in outcomes and "view_missing" not in outcomes
+
+    def test_partition_read_from_split_column(self, cfg, tmp_path):
+        write_chexpert(tmp_path, [chexpert_row("00001", partition="train"),
+                                  chexpert_row("00002", partition="valid")])
+        res = build_cohort("chexpert", cfg, tmp_path, image_manifest=[
+            "patient00001/study1/view1_frontal.jpg",
+            "patient00002/study1/view1_frontal.jpg"])
+        assert set(res.cohort["source_partition"]) == {"train", "valid"}
+
+    def test_unknown_sex_excluded(self, cfg, tmp_path):
+        write_chexpert(tmp_path, [chexpert_row("00001", sex="Unknown"),
+                                  chexpert_row("00002", sex="Male")])
+        res = build_cohort("chexpert", cfg, tmp_path, image_manifest=[
+            "patient00001/study1/view1_frontal.jpg",
+            "patient00002/study1/view1_frontal.jpg"])
+        assert set(res.cohort.patient_id) == {"patient00002"}
+        assert (res.audit.outcome == "demographics_missing").sum() == 1
 
     def test_uncertain_policies(self, cfg, tmp_path):
-        write_chexpert(tmp_path, [chexpert_row("00001", Cardiomegaly=-1.0)])
+        rows = [chexpert_row("00001")]
+        write_chexpert(tmp_path, rows,
+                       [chexpert_label(rows[0]["path_to_image"], Cardiomegaly=-1.0)])
         m = ["patient00001/study1/view1_frontal.jpg"]
         assert pd.isna(build_cohort("chexpert", cfg, tmp_path,
                                     image_manifest=m).cohort.iloc[0]["Cardiomegaly"])
         assert build_cohort("chexpert", cfg, tmp_path, image_manifest=m,
                             uncertain_policy="u_zeros").cohort.iloc[0]["Cardiomegaly"] == 0.0
+
+    def test_malformed_path_raises(self, cfg, tmp_path):
+        rows = [chexpert_row("00001")]
+        rows[0]["path_to_image"] = "train/badly_named.jpg"
+        write_chexpert(tmp_path, rows)
+        with pytest.raises(CohortBuildError, match="image paths"):
+            build_cohort("chexpert", cfg, tmp_path, image_manifest=["x/y/badly_named.jpg"])
 
 
 # ------------------------------- MIMIC ------------------------------------ #
@@ -230,10 +280,16 @@ class TestMIMIC:
             ],
         )
 
-    def test_missing_patients_file_raises(self, cfg, tmp_path):
+    def test_unconfigured_patients_file_raises(self, tmp_path):
+        """MIMIC-CXR carries no age or sex; without MIMIC-IV the build must stop."""
+        data = yaml.safe_load(open(REAL, encoding="utf-8"))
+        data["sites"]["mimic-cxr"]["metadata_files"]["patients"] = None
+        p = tmp_path / "cfg.yaml"
+        p.write_text(yaml.safe_dump(data), encoding="utf-8")
+        cfg_no_demo = load_config(p)
         self._write(tmp_path)
         with pytest.raises(CohortBuildError, match="patients.csv"):
-            build_cohort("mimic-cxr", cfg, tmp_path, image_manifest=["i1"])
+            build_cohort("mimic-cxr", cfg_no_demo, tmp_path, image_manifest=["i1"])
 
     def test_labels_come_from_the_images_own_study(self, cfg_mimic, tmp_path):
         """A patient must not inherit labels pooled across their other studies."""
@@ -361,6 +417,45 @@ class TestIntegrityAndReporting:
         write_nih(tmp_path, [nih_row(1, 1)])
         c = build_cohort("nih", cfg, tmp_path, image_manifest=["1.png"]).cohort
         assert set(c.site) == {"nih"} and set(c.config_hash) == {cfg.config_hash}
+
+
+class TestNoFindingDerivation:
+    """No Finding is derived from observed pathologies, excluding equipment."""
+
+    def test_derived_zero_when_a_pathology_is_positive(self, cfg, tmp_path):
+        """Derivation overrides the labeller, which contradicts itself."""
+        rows = [chexpert_row("00001")]
+        write_chexpert(tmp_path, rows,
+                       [chexpert_label(rows[0]["path_to_image"], Cardiomegaly=1.0,
+                                       No_Finding=1.0)])
+        c = build_cohort("chexpert", cfg, tmp_path,
+                         image_manifest=["patient00001/study1/view1_frontal.jpg"]).cohort
+        assert c.iloc[0]["No Finding"] == 0.0
+
+    def test_derived_one_when_no_pathology_is_positive(self, cfg, tmp_path):
+        rows = [chexpert_row("00001")]
+        write_chexpert(tmp_path, rows, [chexpert_label(rows[0]["path_to_image"])])
+        c = build_cohort("chexpert", cfg, tmp_path,
+                         image_manifest=["patient00001/study1/view1_frontal.jpg"]).cohort
+        assert c.iloc[0]["No Finding"] == 1.0
+
+    def test_equipment_alone_does_not_make_a_radiograph_abnormal(self, cfg, tmp_path):
+        """A support device is hardware, not a finding."""
+        rows = [chexpert_row("00001")]
+        write_chexpert(tmp_path, rows,
+                       [chexpert_label(rows[0]["path_to_image"], Support_Devices=1.0)])
+        c = build_cohort("chexpert", cfg, tmp_path,
+                         image_manifest=["patient00001/study1/view1_frontal.jpg"]).cohort
+        assert c.iloc[0]["No Finding"] == 1.0
+
+    def test_unmodelled_pathology_still_blocks_no_finding(self, cfg, tmp_path):
+        """Lung Opacity is observed but not analysed - the image is still abnormal."""
+        rows = [chexpert_row("00001")]
+        write_chexpert(tmp_path, rows,
+                       [chexpert_label(rows[0]["path_to_image"], Lung_Opacity=1.0)])
+        c = build_cohort("chexpert", cfg, tmp_path,
+                         image_manifest=["patient00001/study1/view1_frontal.jpg"]).cohort
+        assert c.iloc[0]["No Finding"] == 0.0
 
 
 class TestHarmonisationAndBins:
