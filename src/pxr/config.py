@@ -140,6 +140,26 @@ class Config:
         return list(self.demographics["age_bins"]["labels"])
 
     @property
+    def inferential_sites(self) -> list[str]:
+        """Sites whose cells decide label tiers; others are reported descriptively.
+
+        A site retained for external validation and for the acquisition-coupling
+        contrast - rather than for its own subgroup comparisons - must not be able to
+        demote a label that is well powered everywhere else. Which sites are
+        inferential is declared in the config before results are seen.
+        """
+        return list(self.analysis.get("inferential_sites") or self.site_names)
+
+    @property
+    def primary_age_threshold(self) -> int:
+        """Fixed clinical cut-point for the inferential age contrast.
+
+        A fixed value, never a quantile of the observed cohorts: a median split would
+        make the contrast depend on the data, which is what preregistration excludes.
+        """
+        return int(self.demographics.get("primary_age_threshold", 65))
+
+    @property
     def strata(self) -> tuple[str, ...]:
         """Demographic columns crossed with view when enumerating inferential cells."""
         return tuple(self.demographics["strata"])
@@ -255,6 +275,14 @@ def _validate(data: dict) -> None:
             f"({age_max}); the last edge must be strictly greater"
         )
 
+    threshold = data["demographics"].get("primary_age_threshold")
+    if threshold is not None and not (age_min or 0) < threshold < (age_max or 200):
+        raise ConfigError(
+            f"demographics.primary_age_threshold ({threshold}) must lie strictly inside "
+            f"the eligible age range [{age_min}, {age_max}], or one side of the "
+            "contrast would be empty"
+        )
+
     for col in data["demographics"].get("strata", []):
         if col not in ("sex", "age_bin"):
             raise ConfigError(f"unsupported stratum {col!r} (demographic scope is age/sex/site)")
@@ -272,6 +300,13 @@ def _validate(data: dict) -> None:
     if target is not None and not 0 < float(target) < 1:
         raise ConfigError(f"fixed_sensitivity_target must be in (0, 1), got {target}")
 
+    inferential = data["analysis"].get("inferential_sites") or []
+    unknown_sites = [s for s in inferential if s not in data["sites"]]
+    if unknown_sites:
+        raise ConfigError(
+            f"analysis.inferential_sites names unconfigured site(s): {unknown_sites}"
+        )
+
     source = data["model"].get("primary_source")
     if source not in data["sites"]:
         raise ConfigError(f"model.primary_source {source!r} is not a configured site")
@@ -281,6 +316,21 @@ def _validate(data: dict) -> None:
 
 
 def load_config(path: str | Path = "config/study_config.yaml") -> Config:
+    """Load, validate, and hash the study configuration.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the file does not exist.
+    ConfigError
+        If the configuration is internally inconsistent.
+
+    Examples
+    --------
+    >>> cfg = load_config()
+    >>> cfg.config_hash
+    'dad615c619a6'
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"config not found: {path}")
@@ -292,6 +342,11 @@ def load_config(path: str | Path = "config/study_config.yaml") -> Config:
 
 
 def freeze_config(cfg: Config, frozen_dir: str | Path = "config/frozen") -> Path:
+    """Write a timestamped, hash-stamped copy of the config.
+
+    Called by notebook 04 immediately before the ``v1.0-prereg`` tag, so the exact
+    configuration under which the study was pre-specified is recoverable.
+    """
     frozen_dir = Path(frozen_dir)
     frozen_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

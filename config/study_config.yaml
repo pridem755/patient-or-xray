@@ -34,6 +34,7 @@ sites:
     metadata_files:
       records: mimic-cxr-2.0.0-metadata.csv
       labels: mimic-cxr-2.0.0-chexpert.csv
+      
       patients: patients.csv
     keys:
       patient: subject_id
@@ -42,11 +43,12 @@ sites:
       view: ViewPosition
     label_schema: chexpert14
     uncertain_labels: true
-    image_key_depth: 1                   
+    image_key_depth: 1                     
 
   chexpert:
     display_name: CheXpert
     role: external
+    
     metadata_files:
       records: df_chexpert_plus_240401.csv
       records_extra: null
@@ -82,7 +84,7 @@ sites:
       view: "View Position"
     label_schema: nih14
     uncertain_labels: false
-    image_key_depth: 1                    
+    image_key_depth: 1                     
 
 # -----------------------------------------------------------------------------
 # Labels
@@ -135,12 +137,10 @@ labels:
       - No Finding
 
   harmonisation:
-    chexpert14: {}                        
+    chexpert14: {}                         
     nih14:
       Effusion: Pleural Effusion
   no_finding_policy: derive
-
-  # CheXpert/MIMIC uncertain (-1) handling.
   uncertain_policy:
     primary: nan
     sensitivity: u_zeros
@@ -155,21 +155,23 @@ cohort:
   adults_only: true
   age_min: 18
   age_max: 120
-  one_image_per_patient: true           
-  min_manifest_match_rate: 0.95           
+  one_image_per_patient: true             
+  min_manifest_match_rate: 0.95            
 
 # -----------------------------------------------------------------------------
-# Demographics
+# Demographics 
 # -----------------------------------------------------------------------------
 demographics:
   sex_categories: [Male, Female]
+  # Four bands for DESCRIPTIVE reporting only.
   age_bins:
     edges: [18, 40, 60, 80, 121]
     labels: ["18-39", "40-59", "60-79", "80+"]
-  strata: [sex, age_bin]                   # crossed with view for inferential cells
+  primary_age_threshold: 65
+  strata: [sex, age_bin]                   
 
 # -----------------------------------------------------------------------------
-# Splits
+# Splits 
 # -----------------------------------------------------------------------------
 splits:
   ratios: {train: 0.70, val: 0.15, test: 0.15}
@@ -186,31 +188,34 @@ model:
   architecture: densenet121
   pretrained: imagenet
   image_size: 224
-  channels: 3                            
+  channels: 3                             
   batch_size: 32
   optimizer: adamw
   lr: 1.0e-4
   weight_decay: 1.0e-5
   max_epochs: 30
   early_stopping:
-    monitor: val_macro_auroc        
+    monitor: val_macro_auroc              
     patience: 5
   seeds: [0, 1, 2]
   deterministic: true
-  augmentation:                            
+  augmentation:                           
     horizontal_flip: false                
     rotation_degrees: 5
     translate_fraction: 0.05
     scale_range: [0.95, 1.05]
   primary_source: mimic-cxr
   secondary_source: chexpert              
-  robustness_architecture: vit_b_16       
+  robustness_architecture: vit_b_16        
 
 # -----------------------------------------------------------------------------
 # Analysis
 # -----------------------------------------------------------------------------
 analysis:
-  primary_endpoint: fnr_gap                
+  inferential_sites: [mimic-cxr, chexpert]
+  descriptive_sites: [nih]
+
+  primary_endpoint: fnr_gap               
   secondary_endpoints: [fpr_gap, auroc_gap, auprc_gap, calibration_gap]
   threshold_rule:
     primary: fixed_sensitivity
@@ -222,7 +227,7 @@ analysis:
     sensitivity_reference: pooled_source_validation
     applies_to: [fnr, fpr]                 
   calibration:
-    primary: temperature_scaling          
+    primary: temperature_scaling           
     sensitivity: platt_scaling
     conditioning: [global, view]           
     fit_on: source_validation_only
@@ -237,11 +242,13 @@ analysis:
     min_positives_warning: 25              
     target_power: 0.80
     alpha: 0.05
-    simulation_replicates: 2000
-    coarsening_ladder:                     
-      - pool_age_bins_to_median_split
+    simulation_replicates: 20000
+    assumed_baseline_fnr: 0.30
+    meaningful_effect: 0.10
+    coarsening_ladder:
       - demote_label_to_exploratory
       - report_descriptively_only
+    baseline_sensitivity_grid: [0.10, 0.20, 0.30, 0.40]
   outcomes:                                
     attenuation: standardized_gap < raw_gap
     amplification: within_view_or_standardized_gap > raw_gap
