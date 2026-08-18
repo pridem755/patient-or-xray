@@ -1,5 +1,3 @@
-#-------------------------- Cohort Construction ----------------------------------
-
 from __future__ import annotations
 
 import warnings
@@ -24,11 +22,13 @@ __all__ = [
 
 _NO_FINDING = "No Finding"
 
-#: Projection codes that denote a lateral film .
+#: Projection codes that denote a lateral film 
 LATERAL_CODES: frozenset[str] = frozenset({"LATERAL", "LL", "RL"})
 
 #: Projections analysed. Anything else frontal is counted as non-standard.
 FRONTAL_CODES: frozenset[str] = frozenset({"AP", "PA"})
+
+NON_PATHOLOGY_OBSERVATIONS: frozenset[str] = frozenset({"Support Devices"})
 
 
 class CohortBuildError(RuntimeError):
@@ -82,6 +82,26 @@ class CohortFlow:
 
 @dataclass
 class CohortBuildResult:
+    """Everything a cohort build produces.
+
+    Attributes
+    ----------
+    cohort
+        The analysis table: one row per patient, frontal AP/PA only, labels drawn
+        from each image's own study.
+    flow
+        Step-by-step counts including manifest match rate and every exclusion
+        reason. Becomes the Methods flow diagram.
+    audit
+        Every matched image *before* view and demographic filtering, with its raw
+        projection value, exclusion outcome, and demographics retained - so the
+        distribution of exclusions across groups can be examined rather than
+        assumed benign.
+    warnings
+        Non-fatal integrity notes (e.g. source label vocabulary drift), recorded
+        rather than only emitted so a notebook can surface them.
+    """
+
     cohort: pd.DataFrame
     flow: CohortFlow
     audit: pd.DataFrame
@@ -108,8 +128,6 @@ class CohortBuildResult:
 def canonical_image_key(
     values: pd.Series, depth: int = 1, pattern: str | None = None
 ) -> pd.Series:
-    """Reduce site-specific image identifiers to one comparable form.
-    """
     if depth < 1:
         raise CohortBuildError(f"image key depth must be >= 1, got {depth}")
     text = values.astype("string").str.replace(r"\\", "/", regex=True)
@@ -154,8 +172,7 @@ def _require_schema(df: pd.DataFrame, cfg: Config, site: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Site loaders -> common intermediate schema
-#   patient_id, study_id, image_id, view_raw, is_frontal, sex, age, <labels>
+# Site loaders 
 # --------------------------------------------------------------------------- #
 
 
@@ -205,45 +222,83 @@ def _load_nih(cfg: Config, metadata_dir: Path, flow: CohortFlow) -> pd.DataFrame
     return pd.concat([out, labels], axis=1)
 
 
+def _read_label_jsonl(path: Path, cfg: Config, site: str) -> pd.DataFrame:
+    if not path.exists():
+        raise CohortBuildError(f"required label file not found: {path}")
+    labels = pd.read_json(path, lines=True)
+    if "path_to_image" not in labels.columns:
+        raise CohortBuildError(
+            f"{site}: label file {path.name} has no 'path_to_image' key; "
+            f"found {sorted(labels.columns)[:8]}"
+        )
+    _require_schema(labels, cfg, site)
+    return labels
+
+
 def _load_chexpert(cfg: Config, metadata_dir: Path, flow: CohortFlow) -> pd.DataFrame:
     spec = cfg.sites["chexpert"]
-    wanted = [("train", spec["metadata_files"]["records"])]
-    extra = spec["metadata_files"].get("records_extra")
-    if extra:
-        wanted.append(("valid", extra))
+    files = spec["metadata_files"]
+    cols = spec.get("columns") or {}
 
-    frames = []
-    for partition, name in wanted:
-        frame = _read_csv(metadata_dir / name)  # configured files are required
-        frame["source_partition"] = partition
-        frames.append(frame)
-    raw = pd.concat(frames, ignore_index=True)
+    def col(role: str, default: str) -> str:
+        return cols.get(role, default)
 
-    _require_columns(raw, ["Path", "Sex", "Age", "Frontal/Lateral", "AP/PA"], "chexpert",
-                     "label file")
-    _require_schema(raw, cfg, "chexpert")
-    flow.record("metadata_rows", len(raw), 0, " + ".join(n for _, n in wanted))
+    wanted = [files["records"]]
+    if files.get("records_extra"):
+        wanted.append(files["records_extra"])
+    raw = pd.concat([_read_csv(metadata_dir / n) for n in wanted], ignore_index=True)
 
-    ids = raw["Path"].str.extract(r"(patient\d+)/(study\d+)/")
+    image_col = col("image", "path_to_image")
+    _require_columns(
+        raw,
+        [image_col, col("frontal_lateral", "frontal_lateral"), col("view", "ap_pa"),
+         col("sex", "sex"), col("age", "age")],
+        "chexpert",
+        "records file",
+    )
+    flow.record("metadata_rows", len(raw), 0, " + ".join(wanted))
+
+    labels = _read_label_jsonl(metadata_dir / files["labels"], cfg, "chexpert")
+    probed = raw.merge(
+        labels, left_on=image_col, right_on="path_to_image", how="left",
+        validate="m:1", indicator=True,
+    )
+    n_unlabelled = int((probed["_merge"] == "left_only").sum())
+    merged = probed[probed["_merge"] == "both"].drop(columns="_merge")
+    flow.record(
+        "labels_joined", len(merged), 0,
+        f"{n_unlabelled} image rows had no entry in {Path(files['labels']).name}",
+    )
+    ids = merged[image_col].str.extract(r"(patient\d+)/(study\d+)/")
     if ids[0].isna().any():
         raise CohortBuildError(
-            f"chexpert: {int(ids[0].isna().sum())} Path values do not match the expected "
+            f"chexpert: {int(ids[0].isna().sum())} image paths do not match the expected "
             "'patientNNNNN/studyN/' structure, so identifiers cannot be derived"
+        )
+
+    partition_col = col("partition", "split")
+    if partition_col in merged.columns:
+        partition = merged[partition_col].astype("string")
+    else:
+        partition = (
+            merged[image_col].str.extract(r"(?:^|/)(train|valid|test)/", expand=False)
+            .astype("string")
         )
 
     out = pd.DataFrame(
         {
             "patient_id": ids[0].astype(str),
             "study_id": (ids[0] + "/" + ids[1]).astype(str),
-            "image_id": raw["Path"].astype(str),
-            "view_raw": raw["AP/PA"].astype("string").str.strip().str.upper(),
-            "is_frontal": raw["Frontal/Lateral"].astype("string").str.strip().eq("Frontal"),
-            "sex": raw["Sex"].astype("string").str.strip(),
-            "age": pd.to_numeric(raw["Age"], errors="coerce"),
-            "source_partition": raw["source_partition"].astype("string"),
+            "image_id": merged[image_col].astype(str),
+            "view_raw": merged[col("view", "ap_pa")].astype("string").str.strip().str.upper(),
+            "is_frontal": merged[col("frontal_lateral", "frontal_lateral")]
+            .astype("string").str.strip().str.casefold().eq("frontal"),
+            "sex": merged[col("sex", "sex")].astype("string").str.strip(),
+            "age": pd.to_numeric(merged[col("age", "age")], errors="coerce"),
+            "source_partition": partition,
         }
     )
-    return pd.concat([out, raw[cfg.observation_schema("chexpert")].astype(float)], axis=1)
+    return pd.concat([out, merged[cfg.observation_schema("chexpert")].astype(float)], axis=1)
 
 
 def _load_mimic(cfg: Config, metadata_dir: Path, flow: CohortFlow) -> pd.DataFrame:
@@ -295,6 +350,7 @@ def _load_mimic(cfg: Config, metadata_dir: Path, flow: CohortFlow) -> pd.DataFra
         ).dt.year
         age = merged["anchor_age"] + (study_year - merged["anchor_year"])
     else:
+        # Without a study date the anchor age is the best available estimate.
         warnings.warn(
             "mimic-cxr: StudyDate absent, so age is the MIMIC-IV anchor age rather than "
             "age at the time of the study",
@@ -406,6 +462,21 @@ def _assign_age_bin(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     return out
 
 
+def _derive_no_finding(df: pd.DataFrame, cfg: Config, site: str) -> pd.DataFrame:
+    observed = [
+        cfg.harmonisation(site).get(lab, lab) for lab in cfg.observation_schema(site)
+    ]
+    pathologies = [
+        lab for lab in observed
+        if lab != _NO_FINDING and lab not in NON_PATHOLOGY_OBSERVATIONS and lab in df.columns
+    ]
+    if not pathologies:  # pragma: no cover - defensive
+        return df
+    out = df.copy()
+    out[_NO_FINDING] = (~(out[pathologies] == 1).any(axis=1)).astype(float)
+    return out
+
+
 def verify_manifest(
     site: str,
     cfg: Config,
@@ -473,6 +544,45 @@ def build_cohort(
     uncertain_policy: str | None = None,
     min_manifest_match_rate: float = 0.95,
 ) -> CohortBuildResult:
+    """Attach metadata and labels to the images held for one site.
+
+    Parameters
+    ----------
+    site
+        Configured site key, e.g. ``"nih"``.
+    cfg
+        Loaded study configuration.
+    metadata_dir
+        Directory holding that site's metadata files.
+    image_manifest
+        Identifiers of the images actually held (filenames, paths, or bare IDs -
+        matched canonically). When omitted the cohort is defined by the metadata
+        instead, which is reported as a warning because the analysis population
+        should be defined by the images on disk.
+    uncertain_policy
+        ``"nan"`` (primary) or ``"u_zeros"`` (sensitivity). Defaults to config.
+    min_manifest_match_rate
+        Build fails below this fraction of manifest images matching a metadata row.
+        A low rate almost always means the identifier representations differ, not
+        that metadata are absent - failing loudly prevents a silently truncated
+        cohort.
+
+    Returns
+    -------
+    CohortBuildResult
+
+    Notes
+    -----
+    Validation is deliberately separate: notebooks call
+    :func:`pxr.data.contracts.validate_primary_cohort` next, so the contract report
+    is an explicit recorded artifact.
+
+    Examples
+    --------
+    >>> res = build_cohort("nih", cfg, "data/metadata/nih", image_manifest=names)
+    >>> print(res.flow)
+    >>> res.exclusion_summary()
+    """
     policy = uncertain_policy or cfg.data["labels"]["uncertain_policy"]["primary"]
     flow = CohortFlow(site=site)
 
@@ -528,6 +638,9 @@ def build_cohort(
     df = _harmonise(df, cfg, site)
     observation = [cfg.harmonisation(site).get(lab, lab) for lab in cfg.observation_schema(site)]
     df = apply_uncertain_policy(df, observation, policy)
+
+    if cfg.data["labels"].get("no_finding_policy", "derive") == "derive":
+        df = _derive_no_finding(df, cfg, site)
 
     # ---- classify every image, then split ------------------------------------ #
     df = df.reset_index(drop=True)

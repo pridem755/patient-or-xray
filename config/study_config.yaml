@@ -1,17 +1,18 @@
 meta:
   study: patient-or-xray
-  config_version: "0.1.0"          
+  config_version: "0.1.0"
   title: >-
     Is It the Patient or the X-Ray? Disentangling Demographic and
     Acquisition-Driven Bias in Chest X-Ray AI Across Three Institutions
 
 # -----------------------------------------------------------------------------
-# Paths 
+# Paths
 # -----------------------------------------------------------------------------
 paths:
   drive_root: /content/drive/MyDrive/patient-or-xray
   raw_zips: data/raw_zips
   metadata: data/metadata
+  manifests: data/manifests
   cohorts: data/cohorts
   image_cache: data/image_cache
   splits: data/splits
@@ -21,7 +22,7 @@ paths:
   analysis: outputs/analysis
   figures: outputs/figures
   tables: outputs/tables
-  local_scratch: /content/scratch          
+  local_scratch: /content/scratch
 
 # -----------------------------------------------------------------------------
 # Sites
@@ -29,11 +30,11 @@ paths:
 sites:
   mimic-cxr:
     display_name: MIMIC-CXR
-    role: primary_source                   
+    role: primary_source
     metadata_files:
-      records: mimic-cxr-2.0.0-metadata.csv     
-      labels: mimic-cxr-2.0.0-chexpert.csv      
-      patients: null                            
+      records: mimic-cxr-2.0.0-metadata.csv
+      labels: mimic-cxr-2.0.0-chexpert.csv
+      patients: patients.csv
     keys:
       patient: subject_id
       study: study_id
@@ -41,22 +42,34 @@ sites:
       view: ViewPosition
     label_schema: chexpert14
     uncertain_labels: true
-    image_key_depth: 1                     
+    image_key_depth: 1                   
+
   chexpert:
     display_name: CheXpert
     role: external
     metadata_files:
-      records: train.csv
-      records_extra: valid.csv          
+      records: df_chexpert_plus_240401.csv
+      records_extra: null
+      labels: chexbert_labels/report_fixed.json
+    label_source: chexbert_report
+    columns:
+      image: path_to_image
+      patient: deid_patient_id
+      frontal_lateral: frontal_lateral
+      view: ap_pa
+      sex: sex
+      age: age
+      partition: split
     keys:
-      patient: null                        
-      study: null                          
-      image: Path
-      view: "AP/PA"
+      patient: deid_patient_id
+      study: null                         
+      image: path_to_image
+      view: ap_pa
     label_schema: chexpert14
     uncertain_labels: true
     image_key_depth: 3
-    image_key_pattern: 'patient(\d+)[/_]study(\d+)[/_](view\d+_[a-zA-Z]+)' 
+    image_key_pattern: 'patient(\d+)[/_]study(\d+)[/_](view\d+_[a-zA-Z]+)'
+
   nih:
     display_name: NIH ChestX-ray14
     role: external
@@ -69,7 +82,7 @@ sites:
       view: "View Position"
     label_schema: nih14
     uncertain_labels: false
-    image_key_depth: 1                     
+    image_key_depth: 1                    
 
 # -----------------------------------------------------------------------------
 # Labels
@@ -122,9 +135,12 @@ labels:
       - No Finding
 
   harmonisation:
-    chexpert14: {}                         
+    chexpert14: {}                        
     nih14:
       Effusion: Pleural Effusion
+  no_finding_policy: derive
+
+  # CheXpert/MIMIC uncertain (-1) handling.
   uncertain_policy:
     primary: nan
     sensitivity: u_zeros
@@ -134,16 +150,13 @@ labels:
 # -----------------------------------------------------------------------------
 cohort:
   frontal_only: true
-  allowed_views: [AP, PA]                 
+  allowed_views: [AP, PA]                  
   drop_missing_view: true
   adults_only: true
   age_min: 18
   age_max: 120
-  one_image_per_patient: true
-  selection_rule: earliest_study           # tiebreak: image_id
-  selection_sensitivity_rule: latest_study
-  min_archive_match_rate: 0.95
-  require_image_present_in_archive: true   
+  one_image_per_patient: true           
+  min_manifest_match_rate: 0.95           
 
 # -----------------------------------------------------------------------------
 # Demographics
@@ -153,10 +166,10 @@ demographics:
   age_bins:
     edges: [18, 40, 60, 80, 121]
     labels: ["18-39", "40-59", "60-79", "80+"]
-  strata: [sex, age_bin]                   
+  strata: [sex, age_bin]                   # crossed with view for inferential cells
 
 # -----------------------------------------------------------------------------
-# Splits 
+# Splits
 # -----------------------------------------------------------------------------
 splits:
   ratios: {train: 0.70, val: 0.15, test: 0.15}
@@ -173,14 +186,14 @@ model:
   architecture: densenet121
   pretrained: imagenet
   image_size: 224
-  channels: 3                              
+  channels: 3                            
   batch_size: 32
   optimizer: adamw
   lr: 1.0e-4
   weight_decay: 1.0e-5
   max_epochs: 30
   early_stopping:
-    monitor: val_macro_auroc               
+    monitor: val_macro_auroc        
     patience: 5
   seeds: [0, 1, 2]
   deterministic: true
@@ -190,28 +203,28 @@ model:
     translate_fraction: 0.05
     scale_range: [0.95, 1.05]
   primary_source: mimic-cxr
-  secondary_source: chexpert               
-  robustness_architecture: vit_b_16        
+  secondary_source: chexpert              
+  robustness_architecture: vit_b_16       
 
 # -----------------------------------------------------------------------------
 # Analysis
 # -----------------------------------------------------------------------------
 analysis:
-  primary_endpoint: fnr_gap               
+  primary_endpoint: fnr_gap                
   secondary_endpoints: [fpr_gap, auroc_gap, auprc_gap, calibration_gap]
   threshold_rule:
     primary: fixed_sensitivity
     fixed_sensitivity_target: 0.90         
-    sensitivity_rule: youden              
+    sensitivity_rule: youden               
   standardization:
     reference: fixed_50_50                 
     reference_mix: {AP: 0.5, PA: 0.5}
     sensitivity_reference: pooled_source_validation
     applies_to: [fnr, fpr]                 
   calibration:
-    primary: temperature_scaling         
+    primary: temperature_scaling          
     sensitivity: platt_scaling
-    conditioning: [global, view]         
+    conditioning: [global, view]           
     fit_on: source_validation_only
   bootstrap:
     replicates: 2000

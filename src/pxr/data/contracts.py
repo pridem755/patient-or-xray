@@ -16,6 +16,7 @@ __all__ = [
     "VALID_VIEWS",
     "VALID_SEX",
     "CONFIG_HASH_PATTERN",
+    "check_no_finding_derivation",
     "validate_primary_cohort",
     "validate_repeated_image_cohort",
     "cohort_integrity_stats",
@@ -110,7 +111,7 @@ class ValidationReport:
             ]
         )
 
-    def __str__(self) -> str:  # pragma: no cover - formatting only
+    def __str__(self) -> str:
         return self.summary()
 
 
@@ -146,8 +147,16 @@ CONFIG_HASH_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 
 _NO_FINDING = "No Finding"
 
+#: Equipment observations: present hardware does not make a radiograph abnormal.
+_NON_PATHOLOGY: frozenset[str] = frozenset({"Support Devices"})
+
 
 def _safe_examples(values, limit: int = 3) -> tuple[str, ...]:
+    """Render examples without ever raising.
+
+    ``sorted()`` over heterogeneous types raises ``TypeError``, so a validator that
+    sorted its examples could crash precisely when the data were most malformed.
+    """
     out: list[str] = []
     try:
         for v in values:
@@ -186,6 +195,12 @@ def _dtype_ok(series: pd.Series, kind: str) -> bool:
 
 
 def check_frame_shape(df: pd.DataFrame) -> list[Violation]:
+    """The frame is non-empty and has unique column names.
+
+    Both are fatal and both must be checked first: an empty cohort passes almost
+    every other check vacuously, and duplicate column names make ``df[col]`` return
+    a DataFrame, silently breaking every downstream check.
+    """
     out: list[Violation] = []
     if len(df) == 0:
         out.append(
@@ -210,6 +225,7 @@ def check_frame_shape(df: pd.DataFrame) -> list[Violation]:
 
 
 def check_columns(df: pd.DataFrame, analysis_labels: list[str]) -> list[Violation]:
+    """Required columns exist, carry an acceptable dtype, and contain no nulls."""
     out: list[Violation] = []
     missing = [c for c in COHORT_REQUIRED_COLUMNS if c not in df.columns]
     if missing:
@@ -306,7 +322,12 @@ def check_provenance(
     expected_site: str | None,
     expected_config_hash: str | None,
 ) -> list[Violation]:
-    """Provenance columns are constant and match the caller's expectations."""
+    """Provenance columns are constant *and* match the caller's expectations.
+
+    Constancy alone is insufficient: a cohort in which every row carries the wrong
+    site, or a stale config_hash, would otherwise validate cleanly and corrupt the
+    artifact-tracking chain.
+    """
     out: list[Violation] = []
     for col, expected in (("site", expected_site), ("config_hash", expected_config_hash)):
         if col not in df.columns:
@@ -407,7 +428,11 @@ def check_demographics(
 
 
 def check_label_values(df: pd.DataFrame, labels: list[str]) -> list[Violation]:
-    """Labels are binary or missing (0, 1, or NaN)."""
+    """Labels are binary or missing (0, 1, or NaN).
+
+    The uncertain-label policy is applied during cohort construction; by contract
+    time ``-1`` must already be resolved.
+    """
     out: list[Violation] = []
     for lab in labels:
         if lab not in df.columns:
@@ -433,11 +458,23 @@ def check_no_finding_consistency(
     observation_labels: list[str],
     analysis_labels: list[str] | None = None,
 ) -> list[Violation]:
+    """Structural guard on study-level label integrity.
+
+    A row labelled ``No Finding = 1`` cannot simultaneously carry a positive
+    pathology. The check runs over ``observation_labels`` - the full source label
+    schema - because a contradiction hiding in a label that was not selected for
+    modelling is still evidence that the row's labels are structurally invalid.
+    """
     out: list[Violation] = []
     if _NO_FINDING not in df.columns:
         return out
 
-    disease = [lab for lab in observation_labels if lab != _NO_FINDING and lab in df.columns]
+    # Equipment is excluded on both sides: a support device is hardware, not a
+    # finding, so its presence neither contradicts nor establishes No Finding.
+    disease = [
+        lab for lab in observation_labels
+        if lab != _NO_FINDING and lab not in _NON_PATHOLOGY and lab in df.columns
+    ]
     if not disease:
         return out
 
@@ -475,6 +512,46 @@ def check_no_finding_consistency(
     return out
 
 
+def check_no_finding_derivation(
+    df: pd.DataFrame, observation_labels: list[str]
+) -> list[Violation]:
+    """``No Finding`` must agree with the pathologies it is derived from.
+
+    Complements :func:`check_no_finding_consistency`: that check rejects a labeller
+    that asserts No Finding alongside a positive pathology, while this one verifies
+    the derived column is internally coherent in both directions - no pathology
+    positive implies No Finding=1, any pathology positive implies No Finding=0.
+    """
+    if _NO_FINDING not in df.columns:
+        return []
+    diseases = [
+        lab for lab in observation_labels
+        if lab != _NO_FINDING and lab not in _NON_PATHOLOGY and lab in df.columns
+    ]
+    if not diseases:
+        return []
+
+    any_positive = (df[diseases] == 1).any(axis=1)
+    expected = (~any_positive).astype(float)
+    mismatched = df[_NO_FINDING].notna() & (df[_NO_FINDING] != expected)
+    n = int(mismatched.sum())
+    if n:
+        ex = (
+            _safe_examples(df.loc[mismatched, "image_id"]) if "image_id" in df.columns else ()
+        )
+        return [
+            Violation(
+                "labels.no_finding_derivation",
+                Severity.ERROR,
+                "No Finding disagrees with the pathologies it should be derived from "
+                "(expected 0 where any observed pathology is positive, 1 otherwise)",
+                n_affected=n,
+                examples=ex,
+            )
+        ]
+    return []
+
+
 def check_inferential_cells(
     df: pd.DataFrame,
     analysis_labels: list[str],
@@ -482,6 +559,12 @@ def check_inferential_cells(
     age_bin_col: str = "age_bin",
     strata: tuple[str, ...] = ("sex",),
 ) -> list[Violation]:
+    """WARNING-level: enumerate the cells in which fairness gaps are actually estimated.
+
+    The estimable quantity is not ``label x view`` but ``label x view x demographic``:
+    a label with 3,000 positives in AP views can still be hopeless once split by sex
+    or age band.
+    """
     out: list[Violation] = []
     if "view" not in df.columns:
         return out
@@ -554,6 +637,7 @@ def _validate(
         violations += check_no_finding_consistency(
             df, observation_labels=obs, analysis_labels=analysis_labels
         )
+        violations += check_no_finding_derivation(df, obs)
         if len(df):
             violations += check_inferential_cells(
                 df,
@@ -582,6 +666,20 @@ def validate_primary_cohort(
     strata: tuple[str, ...] = ("sex",),
     strict: bool = True,
 ) -> ValidationReport:
+    """Validate the primary cohort: exactly one image per patient.
+
+    Examples
+    --------
+    >>> report = validate_primary_cohort(
+    ...     df,
+    ...     analysis_labels=cfg.analysis_labels,
+    ...     observation_labels=cfg.observation_schema("nih"),
+    ...     artifact="cohort_nih",
+    ...     expected_site="nih",
+    ...     expected_config_hash=cfg.config_hash,
+    ... )
+    >>> print(report.summary())
+    """
     return _validate(
         df,
         shape=CohortShape.ONE_PER_PATIENT,
@@ -665,6 +763,11 @@ def inferential_cell_table(
     age_bin_col: str = "age_bin",
     strata: tuple[str, ...] = ("sex",),
 ) -> pd.DataFrame:
+    """The audit/power table: one row per site x label x view x demographic cell.
+
+    This is the table that determines whether a fairness comparison is estimable;
+    it feeds the power gate in notebook 03 and the Methods tier table.
+    """
     strat_cols = [c for c in (*strata, age_bin_col) if c in df.columns]
     site = df["site"].iloc[0] if "site" in df.columns and len(df) else None
     rows: list[dict] = []
