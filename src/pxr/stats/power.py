@@ -26,6 +26,7 @@ class PowerError(ValueError):
     """Raised when a power analysis is misspecified."""
 
 DEFAULT_AGE_THRESHOLD: int = 65
+
 DEFAULT_CONTRASTS: dict[str, tuple[str, str]] = {
     "sex": ("Female", "Male"),
     "age_group": ("<65", ">=65"),
@@ -177,10 +178,9 @@ def minimum_detectable_effect(
     Returns
     -------
     float
-        The minimum detectable difference in percentage points expressed as a
-        proportion (0.05 = 5 points), or ``nan`` when no difference within the
-        feasible range reaches the target - meaning the cell cannot support the
-        comparison at all.
+        The minimum detectable difference expressed as a proportion (0.05 = 5
+        points), or ``nan`` when no difference within the feasible range reaches the
+        target - meaning the cell cannot support the comparison at all.
 
     Examples
     --------
@@ -328,6 +328,7 @@ def apply_coarsening_ladder(
     ladder: list[str],
     *,
     age_threshold: int | None = None,
+    inferential_sites: list[str] | None = None,
     **evaluate_kwargs,
 ) -> tuple[pd.DataFrame, dict[str, str]]:
     """Work down the pre-specified ladder until each label's cells are powered.
@@ -338,6 +339,10 @@ def apply_coarsening_ladder(
         Keep the label but move it out of the primary corrected family.
     ``report_descriptively_only``
         Report counts and rates without inferential claims.
+
+    ``inferential_sites`` restricts which sites can trigger a rung, for the same
+    reason it restricts :func:`assign_tiers`: a site retained for description must
+    not demote a label that is powered where the inferential claims are made.
 
     An earlier design pooled the age bands at the *observed pooled median* when a
     label was underpowered. That rung has been removed on two grounds: the primary
@@ -368,7 +373,18 @@ def apply_coarsening_ladder(
     )
     table = evaluate_cells(counts, **evaluate_kwargs)
     applied = {label: "none" for label in labels}
-    failing = set(table.loc[~table["powered"], "label"])
+
+    
+    gating = table
+    if inferential_sites is not None:
+        gating = table[table["site"].isin(inferential_sites)]
+        if gating.empty:
+            raise PowerError(
+                f"no cells from inferential_sites={inferential_sites}; "
+                f"available sites: {sorted(table['site'].unique())}"
+            )
+
+    failing = set(gating.loc[~gating["powered"], "label"])
     if not failing:
         return table, applied
 
@@ -433,9 +449,10 @@ def assign_tiers(
         cells = gating[gating["label"] == label]
         all_cells = table[table["label"] == label]
         if cells.empty:
-            rows.append({"label": label, "n_cells": 0, "n_powered": 0, "sites_powered": 0,
-                         "worst_mde": float("nan"), "median_mde": float("nan"),
-                         "tier": "descriptive", "reason": "no cells"})
+            rows.append({"label": label, "n_cells": 0, "n_gating_cells": 0, "n_powered": 0,
+                         "sites_powered": 0, "worst_mde": float("nan"),
+                         "median_mde": float("nan"), "tier": "descriptive",
+                         "reason": "no cells"})
             continue
 
         powered = cells["powered"]
