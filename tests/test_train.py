@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+
 import pytest
 
 pytest.importorskip("torch", reason="training tests need torch; CI runs the rest")
