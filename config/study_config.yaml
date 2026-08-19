@@ -1,6 +1,6 @@
 meta:
   study: patient-or-xray
-  config_version: "0.1.0"
+  config_version: "0.1.0"          # bump on every edit
   title: >-
     Is It the Patient or the X-Ray? Disentangling Demographic and
     Acquisition-Driven Bias in Chest X-Ray AI Across Three Institutions
@@ -12,7 +12,6 @@ paths:
   drive_root: /content/drive/MyDrive/patient-or-xray
   raw_zips: data/raw_zips
   metadata: data/metadata
-  manifests: data/manifests
   cohorts: data/cohorts
   image_cache: data/image_cache
   splits: data/splits
@@ -22,7 +21,7 @@ paths:
   analysis: outputs/analysis
   figures: outputs/figures
   tables: outputs/tables
-  local_scratch: /content/scratch
+  local_scratch: /content/scratch          
 
 # -----------------------------------------------------------------------------
 # Sites
@@ -30,11 +29,10 @@ paths:
 sites:
   mimic-cxr:
     display_name: MIMIC-CXR
-    role: primary_source
+    role: primary_source                   
     metadata_files:
-      records: mimic-cxr-2.0.0-metadata.csv
-      labels: mimic-cxr-2.0.0-chexpert.csv
-      
+      records: mimic-cxr-2.0.0-metadata.csv     
+      labels: mimic-cxr-2.0.0-chexpert.csv      
       patients: patients.csv
     keys:
       patient: subject_id
@@ -44,11 +42,9 @@ sites:
     label_schema: chexpert14
     uncertain_labels: true
     image_key_depth: 1                     
-
   chexpert:
     display_name: CheXpert
     role: external
-    
     metadata_files:
       records: df_chexpert_plus_240401.csv
       records_extra: null
@@ -71,7 +67,6 @@ sites:
     uncertain_labels: true
     image_key_depth: 3
     image_key_pattern: 'patient(\d+)[/_]study(\d+)[/_](view\d+_[a-zA-Z]+)'
-
   nih:
     display_name: NIH ChestX-ray14
     role: external
@@ -84,11 +79,9 @@ sites:
       view: "View Position"
     label_schema: nih14
     uncertain_labels: false
-    image_key_depth: 1                     
+    image_key_depth: 1                    
 
-# -----------------------------------------------------------------------------
-# Labels
-# -----------------------------------------------------------------------------
+
 labels:
   analysis:
     - Atelectasis
@@ -140,7 +133,9 @@ labels:
     chexpert14: {}                         
     nih14:
       Effusion: Pleural Effusion
+      
   no_finding_policy: derive
+
   uncertain_policy:
     primary: nan
     sensitivity: u_zeros
@@ -150,13 +145,14 @@ labels:
 # -----------------------------------------------------------------------------
 cohort:
   frontal_only: true
-  allowed_views: [AP, PA]                  
+  allowed_views: [AP, PA]                 
   drop_missing_view: true
   adults_only: true
   age_min: 18
   age_max: 120
-  one_image_per_patient: true             
-  min_manifest_match_rate: 0.95            
+  
+  one_image_per_patient: true              
+  min_manifest_match_rate: 0.95           
 
 # -----------------------------------------------------------------------------
 # Demographics 
@@ -167,19 +163,23 @@ demographics:
   age_bins:
     edges: [18, 40, 60, 80, 121]
     labels: ["18-39", "40-59", "60-79", "80+"]
+  
   primary_age_threshold: 65
-  strata: [sex, age_bin]                   
+  strata: [sex, age_bin]                 
 
 # -----------------------------------------------------------------------------
 # Splits 
 # -----------------------------------------------------------------------------
 splits:
-  ratios: {train: 0.70, val: 0.15, test: 0.15}
+  n_folds: 5
   seed: 42
-  stratify_by: [view, sex]
+  stratify_by: [view, sex, Cardiomegaly]
+  val_fraction: 0.15
+  min_val_stratum: 7
   note: >-
-    Official MIMIC split is not used: its test set (275 patients) is far too small
-    for subgroup fairness estimation. Documented in Methods.
+    The official MIMIC split is not used: its test set (275 patients) cannot support
+    subgroup fairness estimation. Prevalence is never engineered - oversampling
+    positives would make false-negative rates uninterpretable.
 
 # -----------------------------------------------------------------------------
 # Model
@@ -188,7 +188,7 @@ model:
   architecture: densenet121
   pretrained: imagenet
   image_size: 224
-  channels: 3                             
+  channels: 3                              
   batch_size: 32
   optimizer: adamw
   lr: 1.0e-4
@@ -199,13 +199,13 @@ model:
     patience: 5
   seeds: [0, 1, 2]
   deterministic: true
-  augmentation:                           
+  augmentation:                            
     horizontal_flip: false                
     rotation_degrees: 5
     translate_fraction: 0.05
     scale_range: [0.95, 1.05]
-  primary_source: mimic-cxr
-  secondary_source: chexpert              
+  training_sites: [mimic-cxr, chexpert]
+  primary_source: mimic-cxr                
   robustness_architecture: vit_b_16        
 
 # -----------------------------------------------------------------------------
@@ -215,19 +215,23 @@ analysis:
   inferential_sites: [mimic-cxr, chexpert]
   descriptive_sites: [nih]
 
-  primary_endpoint: fnr_gap               
+  design:
+    primary: within_site_replication
+    secondary: cross_site_transport
+
+  primary_endpoint: fnr_gap                
   secondary_endpoints: [fpr_gap, auroc_gap, auprc_gap, calibration_gap]
   threshold_rule:
     primary: fixed_sensitivity
-    fixed_sensitivity_target: 0.90         
-    sensitivity_rule: youden               
+    fixed_sensitivity_target: 0.90        
+    sensitivity_rule: youden              
   standardization:
     reference: fixed_50_50                 
     reference_mix: {AP: 0.5, PA: 0.5}
     sensitivity_reference: pooled_source_validation
     applies_to: [fnr, fpr]                 
   calibration:
-    primary: temperature_scaling           
+    primary: temperature_scaling          
     sensitivity: platt_scaling
     conditioning: [global, view]           
     fit_on: source_validation_only

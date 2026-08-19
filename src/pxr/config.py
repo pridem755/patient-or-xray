@@ -140,23 +140,37 @@ class Config:
         return list(self.demographics["age_bins"]["labels"])
 
     @property
-    def inferential_sites(self) -> list[str]:
-        """Sites whose cells decide label tiers; others are reported descriptively.
+    def training_sites(self) -> list[str]:
+        """Sites that train their own model, one per institution."""
+        return list(self.model.get("training_sites") or [self.model["primary_source"]])
 
-        A site retained for external validation and for the acquisition-coupling
-        contrast - rather than for its own subgroup comparisons - must not be able to
-        demote a label that is well powered everywhere else. Which sites are
-        inferential is declared in the config before results are seen.
-        """
+    @property
+    def n_folds(self) -> int:
+        return int(self.splits["n_folds"])
+
+    @property
+    def val_fraction(self) -> float:
+        """Share of the development set held out for validation within each fold."""
+        return float(self.splits.get("val_fraction", 0.15))
+
+    @property
+    def min_val_stratum(self) -> int:
+        """Smallest stratum that contributes validation patients."""
+        return int(self.splits.get("min_val_stratum", 7))
+
+    @property
+    def stratify_by(self) -> list[str]:
+        """Variables held even across folds - a pre-specified scientific choice."""
+        return list(self.splits["stratify_by"])
+
+    @property
+    def inferential_sites(self) -> list[str]:
+        """Sites whose cells decide label tiers; others are reported descriptively."""
         return list(self.analysis.get("inferential_sites") or self.site_names)
 
     @property
     def primary_age_threshold(self) -> int:
-        """Fixed clinical cut-point for the inferential age contrast.
-
-        A fixed value, never a quantile of the observed cohorts: a median split would
-        make the contrast depend on the data, which is what preregistration excludes.
-        """
+        """Fixed clinical cut-point for the inferential age contrast."""
         return int(self.demographics.get("primary_age_threshold", 65))
 
     @property
@@ -231,8 +245,6 @@ def _validate(data: dict) -> None:
     if len(set(analysis)) != len(analysis):
         raise ConfigError("labels.analysis contains duplicates")
 
-    # Every analysis label must be reachable from every site's observation schema,
-    # either natively or through that schema's harmonisation map.
     schemas = labels.get("observation_schema") or {}
     harmon = labels.get("harmonisation") or {}
     for site, spec in data["sites"].items():
@@ -269,6 +281,9 @@ def _validate(data: dict) -> None:
         raise ConfigError(
             f"age_bins.edges starts at {edges[0]} but cohort.age_min is {age_min}"
         )
+    # Bins are half-open [lo, hi), so the final edge must exceed age_max or a
+    # patient at exactly age_max would pass the age filter and then fall outside
+    # every bin - silently vanishing from age-stratified analyses.
     if age_max is not None and edges[-1] <= age_max:
         raise ConfigError(
             f"age_bins.edges ends at {edges[-1]}, which does not cover cohort.age_max "
@@ -287,10 +302,33 @@ def _validate(data: dict) -> None:
         if col not in ("sex", "age_bin"):
             raise ConfigError(f"unsupported stratum {col!r} (demographic scope is age/sex/site)")
 
-    ratios = data["splits"]["ratios"]
-    total = sum(ratios.values())
-    if abs(total - 1.0) > 1e-9:
-        raise ConfigError(f"splits.ratios must sum to 1.0, got {total}")
+    n_folds = data["splits"].get("n_folds")
+    if n_folds is None or int(n_folds) < 2:
+        raise ConfigError(f"splits.n_folds must be at least 2, got {n_folds}")
+
+    val_fraction = data["splits"].get("val_fraction", 0.15)
+    if not 0 < float(val_fraction) < 1:
+        raise ConfigError(f"splits.val_fraction must lie in (0, 1), got {val_fraction}")
+    strat = data["splits"].get("stratify_by") or []
+    if not strat:
+        raise ConfigError(
+            "splits.stratify_by must name at least one column; which variables are "
+            "balanced across folds is a pre-specified choice"
+        )
+
+    training = data["model"].get("training_sites") or []
+    if not training:
+        raise ConfigError("model.training_sites must name at least one site")
+    unknown_training = [s for s in training if s not in data["sites"]]
+    if unknown_training:
+        raise ConfigError(f"model.training_sites names unconfigured site(s): {unknown_training}")
+    inferential_set = set(data["analysis"].get("inferential_sites") or [])
+    not_trained = sorted(inferential_set - set(training))
+    if not_trained:
+        raise ConfigError(
+            f"inferential site(s) {not_trained} are not in model.training_sites; a site "
+            "cannot carry within-site inferential claims without its own model"
+        )
 
     mix = data["analysis"]["standardization"].get("reference_mix") or {}
     if mix and abs(sum(mix.values()) - 1.0) > 1e-9:
@@ -318,6 +356,15 @@ def _validate(data: dict) -> None:
 def load_config(path: str | Path = "config/study_config.yaml") -> Config:
     """Load, validate, and hash the study configuration.
 
+    Parameters
+    ----------
+    path
+        Path to ``study_config.yaml``.
+
+    Returns
+    -------
+    Config
+
     Raises
     ------
     FileNotFoundError
@@ -329,7 +376,7 @@ def load_config(path: str | Path = "config/study_config.yaml") -> Config:
     --------
     >>> cfg = load_config()
     >>> cfg.config_hash
-    'dad615c619a6'
+    'a1b2c3d4e5f6'
     """
     path = Path(path)
     if not path.exists():
@@ -346,6 +393,11 @@ def freeze_config(cfg: Config, frozen_dir: str | Path = "config/frozen") -> Path
 
     Called by notebook 04 immediately before the ``v1.0-prereg`` tag, so the exact
     configuration under which the study was pre-specified is recoverable.
+
+    Returns
+    -------
+    Path
+        Location of the frozen copy.
     """
     frozen_dir = Path(frozen_dir)
     frozen_dir.mkdir(parents=True, exist_ok=True)
