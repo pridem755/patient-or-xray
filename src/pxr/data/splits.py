@@ -114,6 +114,7 @@ def assign_folds(
     out["fold"] = folds.astype(int)
     return out
 
+
 DEFAULT_MIN_VAL_STRATUM = 7
 
 
@@ -126,22 +127,35 @@ def plan_validation_allocation(
 ) -> pd.DataFrame:
     """Decide how many validation patients each stratum contributes.
 
-    Two things are made explicit rather than left to rounding.
+    The total is enforced, not approximated. ``round(val_fraction * n)`` patients are
+    allocated or the call fails: an allocator that quietly returns fewer would leave
+    the operating threshold fitted on a fraction of the intended data, and nothing
+    downstream would reveal it.
 
-    A stratum with fewer than ``min_stratum_size`` patients contributes none: taking
-    one patient from a stratum of three would hand it a validation share of 33%, and
-    rounding would otherwise decide the matter invisibly.
+    Two rules govern the distribution.
 
-    Among eligible strata, the remainder is allocated by largest fractional part, so
-    the total validation count matches the target exactly instead of drifting low as
-    each stratum rounds down independently.
+    A stratum with fewer than ``min_stratum_size`` patients contributes none - taking
+    one from a stratum of three would hand it a 33% validation share, and rounding
+    should not settle that invisibly.
+
+    Among eligible strata the floor is allocated first, then the remainder is
+    distributed by largest fractional part. Where that still falls short - because
+    ineligible strata contribute nothing - the shortfall is distributed over eligible
+    strata in size order, largest first, so the additional draws land where they cost
+    proportionally least.
+
+    Raises
+    ------
+    SplitError
+        If the eligible strata cannot supply the target between them. Lowering
+        ``min_stratum_size`` or coarsening ``stratify_by`` is then a deliberate
+        choice, made visibly, rather than an outcome absorbed in silence.
 
     Returns
     -------
     DataFrame
-        One row per stratum with its size, the exact target, the allocation, and
-        whether it was skipped - so the notebook can report what was excluded rather
-        than leaving it silent.
+        One row per stratum: size, exact target, allocation, and whether it was
+        skipped - so a notebook can report what was excluded.
     """
     present = [c for c in stratify_by if c in development.columns]
     groups = (
@@ -163,15 +177,47 @@ def plan_validation_allocation(
             "eligible": eligible,
         })
     plan = pd.DataFrame(rows)
+    plan["n_val"] = plan["floor"]
 
     target = int(round(len(development) * val_fraction))
-    shortfall = target - int(plan["floor"].sum())
-    plan["n_val"] = plan["floor"]
+    eligible_idx = plan.index[plan["eligible"]]
+    capacity = int(plan.loc[eligible_idx, "n_patients"].sum())
+    if capacity < target:
+        raise SplitError(
+            f"eligible strata hold {capacity:,} patients but {target:,} validation "
+            f"patients are required ({val_fraction:.0%} of {len(development):,}). "
+            f"{int((~plan['eligible']).sum())} of {len(plan)} strata were excluded as "
+            f"smaller than {min_stratum_size}. Coarsen stratify_by or lower "
+            "min_stratum_size - deliberately, not by accident."
+        )
+
+    shortfall = target - int(plan["n_val"].sum())
     if shortfall > 0:
-        # Largest remainder first: the total lands on target rather than drifting low.
-        order = plan[plan["eligible"]].sort_values("remainder", ascending=False).index
+        order = plan.loc[eligible_idx].sort_values("remainder", ascending=False).index
         for idx in order[:shortfall]:
             plan.loc[idx, "n_val"] += 1
+        shortfall = target - int(plan["n_val"].sum())
+
+    while shortfall > 0:
+        order = plan.loc[eligible_idx].sort_values("n_patients", ascending=False).index
+        placed = 0
+        for idx in order:
+            if shortfall == 0:
+                break
+            if plan.loc[idx, "n_val"] < plan.loc[idx, "n_patients"]:
+                plan.loc[idx, "n_val"] += 1
+                shortfall -= 1
+                placed += 1
+        if placed == 0:  
+            raise SplitError(
+                f"could not allocate {shortfall:,} further validation patients; "
+                "eligible strata are exhausted"
+            )
+
+    allocated = int(plan["n_val"].sum())
+    if allocated != target:  
+        raise SplitError(f"allocated {allocated:,} validation patients, expected {target:,}")
+
     plan["skipped"] = ~plan["eligible"]
     return plan.drop(columns=["floor", "remainder"])
 
@@ -181,6 +227,7 @@ def fold_membership(
     cohort: pd.DataFrame,
     *,
     stratify_by: list[str],
+    val_stratify_by: list[str] | None = None,
     n_folds: int = DEFAULT_N_FOLDS,
     val_fraction: float = DEFAULT_VAL_FRACTION,
     min_val_stratum: int = DEFAULT_MIN_VAL_STRATUM,
@@ -191,6 +238,13 @@ def fold_membership(
     The named fold is the test set. The remaining folds form the development set,
     from which a stratified ``val_fraction`` is drawn for early stopping and
     threshold selection; everything else trains.
+
+    ``val_stratify_by`` defaults to ``stratify_by`` minus its pathology terms, and
+    is deliberately coarser. The outer folds carry the fairness estimates, so they
+    balance acquisition, demographics, and case mix alike. Validation only selects a
+    stopping epoch and an operating threshold; it needs acquisition and demographic
+    balance but not pathology balance, and a finer partition would fragment it into
+    strata too small to allocate - the failure this coarsening avoids.
 
     Returns
     -------
@@ -218,14 +272,18 @@ def fold_membership(
     if development.empty:  # pragma: no cover - defensive
         raise SplitError(f"fold {fold} leaves no development data")
 
+    if val_stratify_by is None:
+        val_stratify_by = [c for c in stratify_by if c in ("view", "sex", "age_bin")]
+
     plan = plan_validation_allocation(
-        development, stratify_by=stratify_by, val_fraction=val_fraction,
+        development, stratify_by=val_stratify_by, val_fraction=val_fraction,
         min_stratum_size=min_val_stratum,
     )
+
     allocation = dict(zip(plan["stratum"], plan["n_val"], strict=True))
 
     rng = np.random.default_rng(seed + fold)
-    present = [c for c in stratify_by if c in development.columns]
+    present = [c for c in val_stratify_by if c in development.columns]
     groups = (
         list(development.groupby(present, observed=True, dropna=False))
         if present

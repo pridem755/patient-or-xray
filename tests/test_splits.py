@@ -375,3 +375,73 @@ class TestOutOfFoldAssembly:
         del preds[3]
         with pytest.raises(SplitError, match="no predictions for fold"):
             assemble_out_of_fold(preds, cohort)
+
+
+class TestAllocationIsEnforced:
+    """A shortfall must fail loudly; silence is the failure mode being removed."""
+
+    def test_many_ineligible_strata_still_reach_the_target(self):
+        """Ineligible strata contribute nothing, so eligible ones must absorb the rest."""
+        development = pd.DataFrame({"g": list(np.repeat(np.arange(4), 2000))
+                                        + list(np.repeat(np.arange(100, 300), 4))})
+        plan = plan_validation_allocation(development, stratify_by=["g"],
+                                          val_fraction=0.15, min_stratum_size=7)
+        assert int(plan["n_val"].sum()) == round(len(development) * 0.15)
+        assert plan["skipped"].sum() == 200      # the tiny strata were excluded
+
+    def test_impossible_allocation_raises_rather_than_returning_short(self):
+        """400 strata of five: nothing is eligible, so the target cannot be met."""
+        development = pd.DataFrame({"g": np.repeat(np.arange(400), 5)})
+        with pytest.raises(SplitError, match="validation patients are required"):
+            plan_validation_allocation(development, stratify_by=["g"],
+                                       val_fraction=0.15, min_stratum_size=7)
+
+    def test_error_names_the_remedies(self):
+        development = pd.DataFrame({"g": np.repeat(np.arange(400), 5)})
+        with pytest.raises(SplitError, match="Coarsen stratify_by or lower"):
+            plan_validation_allocation(development, stratify_by=["g"],
+                                       val_fraction=0.15, min_stratum_size=7)
+
+    def test_no_stratum_is_allocated_beyond_its_size(self):
+        development = pd.DataFrame({"g": list(np.repeat([0], 500))
+                                        + list(np.repeat(np.arange(50, 150), 5))})
+        plan = plan_validation_allocation(development, stratify_by=["g"],
+                                          val_fraction=0.15, min_stratum_size=7)
+        assert (plan["n_val"] <= plan["n_patients"]).all()
+
+    def test_target_is_exact_across_a_range_of_fractions(self):
+        cohort = folded(n=5000)
+        development = cohort[cohort["fold"] != 0]
+        for fraction in (0.05, 0.10, 0.15, 0.25):
+            plan = plan_validation_allocation(development, stratify_by=["view", "sex"],
+                                              val_fraction=fraction, min_stratum_size=7)
+            assert int(plan["n_val"].sum()) == round(len(development) * fraction)
+
+
+class TestValidationStratification:
+    """Validation is stratified more coarsely than the outer folds, on purpose."""
+
+    def test_defaults_to_dropping_pathology_terms(self):
+        cohort = folded(n=4000)
+        role = fold_membership(0, cohort, stratify_by=["view", "sex", "Cardiomegaly"])
+        assert abs((role == "val").mean() - 0.12) < 0.02
+
+    def test_explicit_val_stratification_is_honoured(self):
+        cohort = folded(n=4000)
+        role = fold_membership(0, cohort, stratify_by=["view", "sex", "Cardiomegaly"],
+                               val_stratify_by=["view"])
+        assert abs((role == "val").mean() - 0.12) < 0.02
+
+    def test_validation_preserves_the_view_mix(self):
+        """Validation sets the operating threshold, so its acquisition mix must match."""
+        cohort = folded(n=8000)
+        role = fold_membership(0, cohort, stratify_by=["view", "sex", "Cardiomegaly"])
+        development = cohort[role != "test"]
+        val = cohort[role == "val"]
+        assert abs((val["view"] == "AP").mean() - (development["view"] == "AP").mean()) < 0.03
+
+    def test_coarser_validation_still_hits_the_target_share(self):
+        cohort = folded(n=6000)
+        for k in range(5):
+            role = fold_membership(k, cohort, stratify_by=["view", "sex", "Cardiomegaly"])
+            assert abs((role == "val").mean() - 0.12) < 0.02

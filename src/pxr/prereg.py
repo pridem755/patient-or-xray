@@ -216,11 +216,19 @@ would make it depend on the cohorts.
   uses the full cohort's positives while no prediction comes from a model that
   trained on that patient.
 
+  The validation split is stratified on {', '.join(cfg.val_stratify_by)} - coarser
+  than the folds themselves. The folds carry the fairness estimates and so balance
+  acquisition, demographics and case mix alike; validation only selects a stopping
+  epoch and an operating threshold, which needs acquisition and demographic balance
+  but not pathology balance, and a finer partition fragments into strata too small to
+  allocate.
+
   Strata smaller than {cfg.min_val_stratum} patients contribute no validation
   patients, and the count of such strata is reported: at {cfg.val_fraction:.0%} a
-  stratum of three rounds to zero, and rounding should not decide that silently.
-  Among eligible strata the remainder is allocated by largest fractional part, so the
-  validation total matches its target rather than drifting low.
+  stratum of three rounds to zero, and rounding should not decide that silently. The
+  allocator then enforces the exact total - {cfg.val_fraction:.0%} of the development
+  set - distributing any shortfall over the eligible strata, and raising rather than
+  returning a smaller set if they cannot supply it.
 
   After the {cfg.n_folds} models are trained, their test predictions are concatenated
   into a single out-of-fold table in which every patient appears exactly once,

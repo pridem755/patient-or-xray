@@ -1,12 +1,12 @@
 meta:
   study: patient-or-xray
-  config_version: "0.1.0"          # bump on every edit
+  config_version: "0.1.0"         
   title: >-
     Is It the Patient or the X-Ray? Disentangling Demographic and
     Acquisition-Driven Bias in Chest X-Ray AI Across Three Institutions
 
 # -----------------------------------------------------------------------------
-# Paths
+# Paths 
 # -----------------------------------------------------------------------------
 paths:
   drive_root: /content/drive/MyDrive/patient-or-xray
@@ -32,7 +32,7 @@ sites:
     display_name: MIMIC-CXR
     role: primary_source                   
     metadata_files:
-      records: mimic-cxr-2.0.0-metadata.csv     
+      records: mimic-cxr-2.0.0-metadata.csv    
       labels: mimic-cxr-2.0.0-chexpert.csv      
       patients: patients.csv
     keys:
@@ -42,7 +42,7 @@ sites:
       view: ViewPosition
     label_schema: chexpert14
     uncertain_labels: true
-    image_key_depth: 1                     
+    image_key_depth: 1                    
   chexpert:
     display_name: CheXpert
     role: external
@@ -61,7 +61,7 @@ sites:
       partition: split
     keys:
       patient: deid_patient_id
-      study: null                         
+      study: null                       
       image: path_to_image
       view: ap_pa
     label_schema: chexpert14
@@ -80,8 +80,7 @@ sites:
       view: "View Position"
     label_schema: nih14
     uncertain_labels: false
-    image_key_depth: 1                    
-
+    image_key_depth: 1                   
 
 labels:
   analysis:
@@ -134,7 +133,6 @@ labels:
     chexpert14: {}                         
     nih14:
       Effusion: Pleural Effusion
-      
   no_finding_policy: derive
 
   uncertain_policy:
@@ -146,27 +144,24 @@ labels:
 # -----------------------------------------------------------------------------
 cohort:
   frontal_only: true
-  allowed_views: [AP, PA]                 
+  allowed_views: [AP, PA]                  
   drop_missing_view: true
   adults_only: true
   age_min: 18
   age_max: 120
-  
   one_image_per_patient: true              
-  min_manifest_match_rate: 0.95           
+  min_manifest_match_rate: 0.95            
 
 # -----------------------------------------------------------------------------
 # Demographics 
 # -----------------------------------------------------------------------------
 demographics:
   sex_categories: [Male, Female]
-  # Four bands for DESCRIPTIVE reporting only.
   age_bins:
     edges: [18, 40, 60, 80, 121]
     labels: ["18-39", "40-59", "60-79", "80+"]
-  
   primary_age_threshold: 65
-  strata: [sex, age_bin]                 
+  strata: [sex, age_bin]                   
 
 # -----------------------------------------------------------------------------
 # Splits 
@@ -177,6 +172,7 @@ splits:
   stratify_by: [view, sex, Cardiomegaly]
   val_fraction: 0.15
   min_val_stratum: 7
+  val_stratify_by: [view, sex]
   note: >-
     The official MIMIC split is not used: its test set (275 patients) cannot support
     subgroup fairness estimation. Prevalence is never engineered - oversampling
@@ -196,12 +192,12 @@ model:
   weight_decay: 1.0e-5
   max_epochs: 30
   early_stopping:
-    monitor: val_macro_auroc              
+    monitor: val_macro_auroc           
     patience: 5
   seeds: [0, 1, 2]
   deterministic: true
   augmentation:                            
-    horizontal_flip: false                
+    horizontal_flip: false                 
     rotation_degrees: 5
     translate_fraction: 0.05
     scale_range: [0.95, 1.05]
@@ -225,14 +221,14 @@ analysis:
   threshold_rule:
     primary: fixed_sensitivity
     fixed_sensitivity_target: 0.90        
-    sensitivity_rule: youden              
+    sensitivity_rule: youden               
   standardization:
     reference: fixed_50_50                 
     reference_mix: {AP: 0.5, PA: 0.5}
     sensitivity_reference: pooled_source_validation
-    applies_to: [fnr, fpr]                 
+    applies_to: [fnr, fpr]                
   calibration:
-    primary: temperature_scaling          
+    primary: temperature_scaling         
     sensitivity: platt_scaling
     conditioning: [global, view]           
     fit_on: source_validation_only
@@ -244,7 +240,7 @@ analysis:
     primary_family: holm
     exploratory_family: benjamini_hochberg
   power:
-    min_positives_warning: 25              
+    min_positives_warning: 25            
     target_power: 0.80
     alpha: 0.05
     simulation_replicates: 20000

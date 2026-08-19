@@ -154,6 +154,14 @@ class Config:
         return float(self.splits.get("val_fraction", 0.15))
 
     @property
+    def val_stratify_by(self) -> list[str]:
+        """Variables balanced within the inner validation split (coarser than folds)."""
+        declared = self.splits.get("val_stratify_by")
+        if declared:
+            return list(declared)
+        return [c for c in self.stratify_by if c in ("view", "sex", "age_bin")]
+
+    @property
     def min_val_stratum(self) -> int:
         """Smallest stratum that contributes validation patients."""
         return int(self.splits.get("min_val_stratum", 7))
@@ -281,9 +289,7 @@ def _validate(data: dict) -> None:
         raise ConfigError(
             f"age_bins.edges starts at {edges[0]} but cohort.age_min is {age_min}"
         )
-    # Bins are half-open [lo, hi), so the final edge must exceed age_max or a
-    # patient at exactly age_max would pass the age filter and then fall outside
-    # every bin - silently vanishing from age-stratified analyses.
+  
     if age_max is not None and edges[-1] <= age_max:
         raise ConfigError(
             f"age_bins.edges ends at {edges[-1]}, which does not cover cohort.age_max "
