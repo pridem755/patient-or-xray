@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import io
 import zipfile
+import pytest
+
+pytest.importorskip("torch", reason="training tests need torch; CI runs the rest")
+pytest.importorskip("torchvision")
 
 import numpy as np
 import pandas as pd
