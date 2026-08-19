@@ -22,13 +22,8 @@ __all__ = [
 
 _NO_FINDING = "No Finding"
 
-#: Projection codes that denote a lateral film 
 LATERAL_CODES: frozenset[str] = frozenset({"LATERAL", "LL", "RL"})
-
-#: Projections analysed. Anything else frontal is counted as non-standard.
 FRONTAL_CODES: frozenset[str] = frozenset({"AP", "PA"})
-
-NON_PATHOLOGY_OBSERVATIONS: frozenset[str] = frozenset({"Support Devices"})
 
 
 class CohortBuildError(RuntimeError):
@@ -45,6 +40,13 @@ class CohortFlow:
     def record(
         self, step: str, n_images: int, n_patients: int, note: str = "", kind: str = "population"
     ) -> None:
+        """Record a step.
+
+        ``kind="population"`` rows carry the surviving count and form the attrition
+        chain; ``kind="exclusion"`` rows carry how many images left for one specific
+        reason. Keeping them distinct means the attrition arithmetic stays coherent
+        when several exclusion reasons are reported side by side.
+        """
         self.steps.append(
             {
                 "site": self.site,
@@ -128,13 +130,41 @@ class CohortBuildResult:
 def canonical_image_key(
     values: pd.Series, depth: int = 1, pattern: str | None = None
 ) -> pd.Series:
+    """Reduce site-specific image identifiers to one comparable form.
+
+    The three sites identify images differently - NIH by filename, CheXpert by a
+    path, MIMIC by a bare ``dicom_id`` - so an image list and a metadata row can
+    denote the same radiograph yet fail to match as strings. This keeps the last
+    ``depth`` path components, drops any file extension, and lowercases the result,
+    giving one representation used on **both** sides of every comparison.
+
+    ``depth`` matters: CheXpert names every frontal image ``view1_frontal.jpg``, so
+    the filename alone is not unique and the identifying information lives in the
+    ``patientNNNNN/studyN/`` prefix. Sites therefore declare their own key depth
+    (``sites.<site>.image_key_depth``); a depth that is too shallow would silently
+    collapse many images onto one key.
+
+    ``pattern`` (``sites.<site>.image_key_pattern``) takes precedence and is the
+    robust option when the two sides use different separators or prefixes: the
+    capture groups are joined to form the key, so
+    ``train_patient1_study1_view1_frontal.jpg`` and
+    ``CheXpert-v1.0/train/patient1/study1/view1_frontal.jpg`` reduce to the same
+    value.
+
+    Examples
+    --------
+    >>> list(canonical_image_key(pd.Series(["a/b/c.jpg", "d.PNG", "plain"])))
+    ['c', 'd', 'plain']
+    >>> list(canonical_image_key(pd.Series(["root/patient1/study1/view1.jpg"]), depth=3))
+    ['patient1/study1/view1']
+    """
     if depth < 1:
         raise CohortBuildError(f"image key depth must be >= 1, got {depth}")
     text = values.astype("string").str.replace(r"\\", "/", regex=True)
 
     if pattern is not None:
         extracted = text.str.extract(pattern)
-        if extracted.shape[1] == 0:  # pragma: no cover - defensive
+        if extracted.shape[1] == 0:  
             raise CohortBuildError(f"image_key_pattern {pattern!r} has no capture groups")
         joined = extracted.iloc[:, 0].astype("string")
         for col in extracted.columns[1:]:
@@ -161,6 +191,11 @@ def _require_columns(df: pd.DataFrame, columns: Iterable[str], site: str, what: 
 
 
 def _require_schema(df: pd.DataFrame, cfg: Config, site: str) -> list[str]:
+    """Every configured source observation must exist - never silently narrowed.
+
+    The No Finding integrity guard reasons over the full observation schema, so a
+    quietly dropped label column would weaken a check the study depends on.
+    """
     expected = cfg.observation_schema(site)
     missing = [lab for lab in expected if lab not in df.columns]
     if missing:
@@ -223,6 +258,13 @@ def _load_nih(cfg: Config, metadata_dir: Path, flow: CohortFlow) -> pd.DataFrame
 
 
 def _read_label_jsonl(path: Path, cfg: Config, site: str) -> pd.DataFrame:
+    """Read a CheXbert JSONL label file (one JSON object per line).
+
+    CheXpert Plus ships pathology labels separately from the metadata CSV, as
+    newline-delimited JSON keyed by ``path_to_image``. Values follow the CheXpert
+    convention: ``1`` positive, ``0`` negative, ``-1`` uncertain, ``null`` not
+    mentioned in the report - and ``null`` is *not* a negative, so it stays missing.
+    """
     if not path.exists():
         raise CohortBuildError(f"required label file not found: {path}")
     labels = pd.read_json(path, lines=True)
@@ -236,6 +278,16 @@ def _read_label_jsonl(path: Path, cfg: Config, site: str) -> pd.DataFrame:
 
 
 def _load_chexpert(cfg: Config, metadata_dir: Path, flow: CohortFlow) -> pd.DataFrame:
+    """CheXpert Plus: metadata CSV joined to a separate CheXbert label file.
+
+    The Plus release separates concerns - the CSV holds report text, demographics
+    and acquisition metadata, while pathology labels live in a CheXbert JSONL. Both
+    are keyed by ``path_to_image``, so the join is exact.
+
+    Column names are read from ``sites.chexpert.columns`` rather than hard-coded,
+    because the original CheXpert release and the Plus release name the same fields
+    differently (``AP/PA`` vs ``ap_pa``, ``Path`` vs ``path_to_image``).
+    """
     spec = cfg.sites["chexpert"]
     files = spec["metadata_files"]
     cols = spec.get("columns") or {}
@@ -269,6 +321,7 @@ def _load_chexpert(cfg: Config, metadata_dir: Path, flow: CohortFlow) -> pd.Data
         "labels_joined", len(merged), 0,
         f"{n_unlabelled} image rows had no entry in {Path(files['labels']).name}",
     )
+
     ids = merged[image_col].str.extract(r"(patient\d+)/(study\d+)/")
     if ids[0].isna().any():
         raise CohortBuildError(
@@ -302,6 +355,12 @@ def _load_chexpert(cfg: Config, metadata_dir: Path, flow: CohortFlow) -> pd.Data
 
 
 def _load_mimic(cfg: Config, metadata_dir: Path, flow: CohortFlow) -> pd.DataFrame:
+    """MIMIC-CXR: image records + that study's labels + MIMIC-IV demographics.
+
+    Join attrition is measured rather than absorbed: unmatched rows are counted and
+    broken down by projection, because label-join failure concentrated in one
+    projection would distort the acquisition distribution before analysis begins.
+    """
     files = cfg.sites["mimic-cxr"]["metadata_files"]
     records = _read_csv(metadata_dir / files["records"])
     labels = _read_csv(metadata_dir / files["labels"])
@@ -350,7 +409,6 @@ def _load_mimic(cfg: Config, metadata_dir: Path, flow: CohortFlow) -> pd.DataFra
         ).dt.year
         age = merged["anchor_age"] + (study_year - merged["anchor_year"])
     else:
-        # Without a study date the anchor age is the best available estimate.
         warnings.warn(
             "mimic-cxr: StudyDate absent, so age is the MIMIC-IV anchor age rather than "
             "age at the time of the study",
@@ -461,8 +519,31 @@ def _assign_age_bin(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         )
     return out
 
+NON_PATHOLOGY_OBSERVATIONS: frozenset[str] = frozenset({"Support Devices"})
+
 
 def _derive_no_finding(df: pd.DataFrame, cfg: Config, site: str) -> pd.DataFrame:
+    """Derive ``No Finding`` from every observed pathology, not just the analysed ones.
+
+    The labeller's own ``No Finding`` cannot be used: CheXbert asserts it while also
+    marking pathologies positive, and it never asserts the negation, so the column
+    has no negative class and cannot support an error rate.
+
+    Derivation rule (pre-specified): ``No Finding = 0`` where any observed pathology
+    is positive, ``1`` otherwise. The derivation spans the site's **full observation
+    schema** rather than the analysed subset, because an image reported as showing a
+    lung opacity or a fracture is not a normal radiograph merely because those
+    findings fall outside this study's label set. Equipment observations
+    (:data:`NON_PATHOLOGY_OBSERVATIONS`) are excluded: a support device is hardware,
+    not a finding.
+
+    A stricter rule - requiring every pathology to be *explicitly* negative - was
+    considered and rejected on the data: these labels are mention-based, so no image
+    in the CheXpert cohort carries an explicit negative across all pathologies and
+    the strict rule yields zero positives. "Not mentioned" is therefore read as "not
+    asserted positive", which the Methods must state: No Finding here means *no
+    pathology was reported*, not *the radiograph was verified normal*.
+    """
     observed = [
         cfg.harmonisation(site).get(lab, lab) for lab in cfg.observation_schema(site)
     ]
@@ -483,6 +564,25 @@ def verify_manifest(
     metadata_dir: str | Path,
     image_manifest: Iterable[str],
 ) -> pd.DataFrame:
+    """Check that held image names reconcile with site metadata, before building.
+
+    Run this first. A cohort build that silently matches a fraction of the held
+    images is far more damaging than one that refuses to start, and the usual cause
+    is an identifier-representation difference rather than absent metadata - held
+    CheXpert names are flattened with underscores, for instance, while the metadata
+    ``Path`` keeps directories.
+
+    Returns
+    -------
+    DataFrame
+        One row per check with its value and a pass/fail verdict:
+        held images, parse rate against ``image_key_pattern``, key uniqueness,
+        metadata rows, and the match rate in both directions.
+
+    Examples
+    --------
+    >>> verify_manifest("chexpert", cfg, "data/metadata/chexpert", names)
+    """
     names = pd.Series(sorted(set(image_manifest)), dtype="string")
     if names.empty:
         raise CohortBuildError(f"{site}: image_manifest is empty")
@@ -689,7 +789,7 @@ def build_cohort(
     extra = ["source_partition"] if "source_partition" in cohort.columns else []
     cohort = cohort[keep + extra + label_cols].copy()
     cohort.insert(3, "site", pd.array([site] * len(cohort), dtype="string"))
-    cohort["config_hash"] = pd.array([cfg.config_hash] * len(cohort), dtype="string")
+    cohort["config_hash"] = pd.array([cfg.cohort_hash] * len(cohort), dtype="string")
 
     for col in ("patient_id", "study_id", "image_id", "view", "sex"):
         cohort[col] = cohort[col].astype("string")

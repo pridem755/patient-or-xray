@@ -15,6 +15,8 @@ __all__ = [
     "ConfigError",
     "load_config",
     "compute_config_hash",
+    "compute_scoped_hash",
+    "HASH_SCOPES",
     "freeze_config",
 ]
 
@@ -28,6 +30,36 @@ class ConfigError(ValueError):
 def _canonical_json(data: Any) -> str:
     """Deterministic serialisation: sorted keys, no incidental whitespace."""
     return json.dumps(data, sort_keys=True, separators=(",", ":"), default=str)
+
+HASH_SCOPES: dict[str, tuple[str, ...]] = {
+    "cohort": ("sites", "labels", "cohort", "demographics"),
+    "split": ("sites", "labels", "cohort", "demographics", "splits"),
+    "model": ("sites", "labels", "cohort", "demographics", "splits", "model"),
+    "analysis": ("sites", "labels", "cohort", "demographics", "splits", "model",
+                 "analysis"),
+}
+
+
+def compute_scoped_hash(
+    data: dict, scope: str, length: int = HASH_LENGTH
+) -> str:
+    """Hash the config sections a given kind of artifact depends on.
+
+    Examples
+    --------
+    >>> a = {"cohort": {"age_min": 18}, "model": {"lr": 1e-4}, "sites": {}, "labels": {},
+    ...      "demographics": {}, "splits": {}, "analysis": {}}
+    >>> b = {**a, "model": {"lr": 3e-4}}
+    >>> compute_scoped_hash(a, "cohort") == compute_scoped_hash(b, "cohort")
+    True
+    >>> compute_scoped_hash(a, "model") == compute_scoped_hash(b, "model")
+    False
+    """
+    if scope not in HASH_SCOPES:
+        raise ConfigError(f"unknown hash scope {scope!r}; expected {sorted(HASH_SCOPES)}")
+    scoped = {section: data.get(section) for section in HASH_SCOPES[scope]}
+    digest = hashlib.sha256(_canonical_json(scoped).encode("utf-8")).hexdigest()
+    return digest[:length]
 
 
 def compute_config_hash(data: dict, length: int = HASH_LENGTH) -> str:
@@ -66,6 +98,36 @@ class Config:
     config_hash: str
 
     # -- section accessors ------------------------------------------------- #
+
+    @property
+    def cohort_hash(self) -> str:
+        """Stamp for cohort tables - unchanged by model or analysis settings."""
+        return compute_scoped_hash(self.data, "cohort")
+
+    @property
+    def split_hash(self) -> str:
+        """Stamp for fold assignments - unchanged by model settings."""
+        return compute_scoped_hash(self.data, "split")
+
+    @property
+    def model_hash(self) -> str:
+        """Stamp for checkpoints and predictions - changes when training changes."""
+        return compute_scoped_hash(self.data, "model")
+
+    @property
+    def analysis_hash(self) -> str:
+        """Stamp for analysis outputs."""
+        return compute_scoped_hash(self.data, "analysis")
+
+    def hash_for(self, artifact: str) -> str:
+        """The stamp an artifact kind should carry."""
+        return {
+            "cohort": self.cohort_hash, "flow": self.cohort_hash,
+            "audit": self.cohort_hash,
+            "folds": self.split_hash, "splits": self.split_hash,
+            "model": self.model_hash, "scores": self.model_hash,
+            "oof": self.model_hash,
+        }.get(artifact, self.analysis_hash)
 
     @property
     def meta(self) -> dict:
@@ -210,8 +272,14 @@ class Config:
         source: str | None = None,
         seed: int | None = None,
         ext: str = "parquet",
+        scope: str | None = None,
     ) -> str:
-        """Hash-stamped filename: ``{artifact}_{source}_{site}_seed{k}_{hash}.{ext}``."""
+        """Hash-stamped filename: ``{artifact}_{source}_{site}_seed{k}_{hash}.{ext}``.
+
+        The stamp is scoped to what the artifact depends on, so a cohort keeps its
+        name when a training hyperparameter changes. ``scope`` overrides the mapping
+        in :meth:`hash_for` when an artifact does not follow it.
+        """
         parts = [artifact]
         if source:
             parts.append(source)
@@ -219,7 +287,9 @@ class Config:
             parts.append(site)
         if seed is not None:
             parts.append(f"seed{seed}")
-        parts.append(self.config_hash)
+        parts.append(
+            compute_scoped_hash(self.data, scope) if scope else self.hash_for(artifact)
+        )
         return "_".join(parts) + f".{ext}"
 
 
@@ -253,6 +323,8 @@ def _validate(data: dict) -> None:
     if len(set(analysis)) != len(analysis):
         raise ConfigError("labels.analysis contains duplicates")
 
+    # Every analysis label must be reachable from every site's observation schema,
+    # either natively or through that schema's harmonisation map.
     schemas = labels.get("observation_schema") or {}
     harmon = labels.get("harmonisation") or {}
     for site, spec in data["sites"].items():
@@ -289,7 +361,6 @@ def _validate(data: dict) -> None:
         raise ConfigError(
             f"age_bins.edges starts at {edges[0]} but cohort.age_min is {age_min}"
         )
-  
     if age_max is not None and edges[-1] <= age_max:
         raise ConfigError(
             f"age_bins.edges ends at {edges[-1]}, which does not cover cohort.age_max "

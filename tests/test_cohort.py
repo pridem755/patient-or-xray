@@ -147,7 +147,7 @@ class TestNIH:
             res.cohort, cfg.analysis_labels,
             observation_labels=[cfg.harmonisation("nih").get(x, x)
                                 for x in cfg.observation_schema("nih")],
-            expected_site="nih", expected_config_hash=cfg.config_hash,
+            expected_site="nih", expected_config_hash=cfg.cohort_hash,
             min_positives=0, strict=False,
         )
         assert report.ok, report.summary()
@@ -416,7 +416,7 @@ class TestIntegrityAndReporting:
     def test_provenance_stamped(self, cfg, tmp_path):
         write_nih(tmp_path, [nih_row(1, 1)])
         c = build_cohort("nih", cfg, tmp_path, image_manifest=["1.png"]).cohort
-        assert set(c.site) == {"nih"} and set(c.config_hash) == {cfg.config_hash}
+        assert set(c.site) == {"nih"} and set(c.config_hash) == {cfg.cohort_hash}
 
 
 class TestNoFindingDerivation:

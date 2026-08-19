@@ -10,7 +10,6 @@ pytest.importorskip("torchvision")
 
 import numpy as np
 import pandas as pd
-import pytest
 from PIL import Image
 
 from pxr.data.cache import build_cache
@@ -106,7 +105,7 @@ class TestMaskedLoss:
     def test_positive_weight_raises_the_cost_of_missed_positives(self):
         import torch
 
-        logits = torch.full((8, 1), -3.0)         
+        logits = torch.full((8, 1), -3.0)       
         targets = torch.ones(8, 1)                  
         plain = float(masked_bce_loss(logits, targets))
         weighted = float(masked_bce_loss(logits, targets, torch.tensor([5.0])))
@@ -116,8 +115,8 @@ class TestMaskedLoss:
 class TestPositiveWeights:
     def test_rare_labels_get_larger_weights(self):
         labels = np.zeros((1000, 2))
-        labels[:500, 0] = 1        # 50% prevalence
-        labels[:10, 1] = 1         # 1% prevalence
+        labels[:500, 0] = 1        
+        labels[:10, 1] = 1         
         weights = positive_weights(labels)
         assert weights[1] > weights[0]
 

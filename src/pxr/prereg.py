@@ -99,7 +99,12 @@ All primary labels stable across the grid: **{stable}**.
 **Study.** {cfg.meta['title']}
 
 **Frozen.** {stamp}
-**Configuration hash.** `{cfg.config_hash}`
+**Configuration hash.** `{cfg.config_hash}` (whole file)
+
+Artifacts carry a stamp scoped to what they depend on, so a change to one stage does
+not orphan the stages before it: cohorts `{cfg.cohort_hash}`, folds
+`{cfg.split_hash}`, models and predictions `{cfg.model_hash}`, analysis outputs
+`{cfg.analysis_hash}`.
 {f"**Frozen configuration.** `{frozen_config_path}`" if frozen_config_path else ""}
 
 This plan is generated from the frozen configuration and the power gate's saved
