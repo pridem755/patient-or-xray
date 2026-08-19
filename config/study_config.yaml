@@ -12,6 +12,7 @@ paths:
   drive_root: /content/drive/MyDrive/patient-or-xray
   raw_zips: data/raw_zips
   metadata: data/metadata
+  manifests: data/manifests
   cohorts: data/cohorts
   image_cache: data/image_cache
   splits: data/splits
