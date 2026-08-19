@@ -53,7 +53,7 @@ class TrainConfig:
     translate_fraction: float = 0.05
     scale_range: tuple[float, float] = (0.95, 1.05)
     horizontal_flip: bool = False       
-    num_workers: int = 2
+    num_workers: int = 8
     seed: int = 42
 
     def __post_init__(self) -> None:
