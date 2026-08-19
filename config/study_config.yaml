@@ -185,25 +185,29 @@ model:
   architecture: densenet121
   pretrained: imagenet
   image_size: 224
-  channels: 3                              
+  channels: 3                             
   batch_size: 32
   optimizer: adamw
   lr: 1.0e-4
   weight_decay: 1.0e-5
   max_epochs: 30
+  warmup_epochs: 1
+  mixed_precision: true
+  positive_weighting: true
+  max_positive_weight: 20.0
   early_stopping:
-    monitor: val_macro_auroc           
+    monitor: val_macro_auroc               
     patience: 5
   seeds: [0, 1, 2]
   deterministic: true
-  augmentation:                            
+  augmentation:                           
     horizontal_flip: false                 
     rotation_degrees: 5
     translate_fraction: 0.05
     scale_range: [0.95, 1.05]
   training_sites: [mimic-cxr, chexpert]
   primary_source: mimic-cxr                
-  robustness_architecture: vit_b_16        
+  robustness_architecture: vit_b_16               
 
 # -----------------------------------------------------------------------------
 # Analysis
