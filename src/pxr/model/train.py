@@ -124,7 +124,7 @@ def positive_weights(
         positives = float((observed == 1).sum())
         negatives = float((observed == 0).sum())
         if positives > 0:
-            weights[j] = min(negatives / positives, cap)
+            weights[j] = float(np.clip(negatives / positives, 1.0, cap))
     return weights
 
 
