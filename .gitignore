@@ -35,3 +35,4 @@ venv/
 .ipynb_checkpoints/
 .DS_Store
 .env
+section_findings.json

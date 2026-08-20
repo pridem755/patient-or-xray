@@ -49,8 +49,8 @@ sites:
     metadata_files:
       records: df_chexpert_plus_240401.csv
       records_extra: null
-      labels: chexbert_labels/report_fixed.json
-    label_source: chexbert_report
+      labels: chexbert_labels/findings_fixed.json
+    label_source: chexbert_findings
     columns:
       image: path_to_image
       patient: deid_patient_id
@@ -234,8 +234,12 @@ analysis:
   calibration:
     primary: temperature_scaling         
     sensitivity: platt_scaling
-    conditioning: [global, view]           
+    conditioning: [global, view]
+    primary_arm: global
+    secondary_arm: view          
     fit_on: source_validation_only
+    min_positives_per_view: 25
+    min_negatives_per_view: 25
   bootstrap:
     replicates: 2000
     method: patient_bootstrap
