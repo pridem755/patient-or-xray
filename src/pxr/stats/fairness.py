@@ -27,6 +27,7 @@ __all__ = [
 ]
 
 EQUIVALENCE_MARGIN = 0.02
+
 MIN_POSITIVES_PER_CELL = 10
 
 MAX_REWEIGHT_DISTANCE = 0.30
@@ -542,11 +543,6 @@ def interaction_model(
     if positives["error"].nunique() < 2:
         raise FairnessError(f"{label}: the model made no errors, or only errors")
 
-    # The overall count says little about whether the interaction is estimable. What
-    # matters is the number of *events* - false negatives - in each demographic x view
-    # cell, since the interaction is identified from their contrast. A cell with no
-    # events, or with only events, produces separation: the coefficient runs to
-    # infinity and the odds ratio is an artefact of the optimiser stopping.
     cells = positives.groupby([stratum, view_col])["error"].agg(["size", "sum"])
     cells["non_events"] = cells["size"] - cells["sum"]
     empty = cells[(cells["sum"] == 0) | (cells["non_events"] == 0)]
