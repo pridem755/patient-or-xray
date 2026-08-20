@@ -53,7 +53,7 @@ def nih_row(idx, pid, findings="No Finding", view="PA", sex="M", age=50):
     }
 
 
-def write_chexpert(d, rows, labels=None, label_name="report_fixed.json"):
+def write_chexpert(d, rows, labels=None, label_name="findings_fixed.json"):
     """CheXpert Plus layout: metadata CSV + separate CheXbert JSONL labels."""
     pd.DataFrame(rows).to_csv(d / "df_chexpert_plus_240401.csv", index=False)
     lab_dir = d / "chexbert_labels"
