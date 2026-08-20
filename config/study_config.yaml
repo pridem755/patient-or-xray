@@ -259,7 +259,7 @@ analysis:
       - report_descriptively_only
     baseline_sensitivity_grid: [0.10, 0.20, 0.30, 0.40]
   
-    outcomes:                                
+  outcomes:
     attenuation: delta_gap > 0               
     masking: delta_gap < 0                  
     independence_margin: 0.02
