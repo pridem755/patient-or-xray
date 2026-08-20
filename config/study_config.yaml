@@ -253,7 +253,7 @@ analysis:
     alpha: 0.05
     simulation_replicates: 20000
     assumed_baseline_fnr: 0.30
-    meaningful_effect: 0.10
+    meaningful_effect: 0.12
     coarsening_ladder:
       - demote_label_to_exploratory
       - report_descriptively_only
