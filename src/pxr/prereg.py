@@ -288,6 +288,15 @@ It fixes the analysis choices listed above: the label tiers, the contrasts, the
 endpoints, the thresholds, and the correction procedures. Any departure from them
 will be reported as a departure.
 
+**What standardisation does not establish.** Direct standardisation reweights
+observed rates; it is not a causal analysis. A ΔGap of +0.05 means the disparity is
+five points smaller once both groups carry the same AP/PA mixture - not that
+acquisition *causes* five points of it. Establishing mediation would require AP/PA to
+be the pathway rather than a marker of one, and the variables driving both acquisition
+and model performance (disease severity, ICU status, portable equipment, positioning,
+exposure, device presence) are unmeasured here. Results are reported as associations
+throughout.
+
 It does not make the study assumption-free. The baseline false-negative rate is
 assumed; labels are derived from radiology reports and inherit their omissions;
 "No Finding" means no pathology was reported, not a radiograph verified normal; and

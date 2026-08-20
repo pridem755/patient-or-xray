@@ -258,7 +258,16 @@ analysis:
       - demote_label_to_exploratory
       - report_descriptively_only
     baseline_sensitivity_grid: [0.10, 0.20, 0.30, 0.40]
-  outcomes:                                
-    attenuation: standardized_gap < raw_gap
-    amplification: within_view_or_standardized_gap > raw_gap
-    independence: standardized_gap ~= raw_gap
+  
+    outcomes:                                
+    attenuation: delta_gap > 0               
+    masking: delta_gap < 0                  
+    independence_margin: 0.02
+    independence_margin_sensitivity: [0.01, 0.02, 0.05]
+
+  positivity:
+    min_positives_per_cell: 10
+    max_reweight_distance: 0.30
+
+  interaction:
+    min_events_per_cell: 10
