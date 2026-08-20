@@ -26,10 +26,11 @@ __all__ = [
     "analyse_label",
 ]
 
-
 EQUIVALENCE_MARGIN = 0.02
 MIN_POSITIVES_PER_CELL = 10
+
 MAX_REWEIGHT_DISTANCE = 0.30
+
 DEFAULT_REFERENCE_MIX: dict[str, float] = {"AP": 0.5, "PA": 0.5}
 
 
@@ -126,6 +127,74 @@ class StandardisedGap:
             "attempted_replicates": self.attempted_replicates,
             "n_a": self.n_a, "n_b": self.n_b,
         }
+
+
+# --------------------------------------------------------------------------- #
+# Vectorised core
+# --------------------------------------------------------------------------- #
+
+
+def _as_arrays(
+    frame: pd.DataFrame, label: str, stratum: str, levels: tuple[str, str],
+    view_col: str = "view",
+) -> dict:
+    """Reduce a frame to the four arrays the bootstrap needs.
+
+    The bootstrap recomputes several statistics thousands of times, and doing that on
+    a DataFrame spends most of its time in pandas indexing rather than arithmetic.
+    Converting once to boolean and integer arrays lets each replicate be a handful of
+    numpy operations on an index vector.
+
+    Only disease-positive patients are kept: every rate here has positives as its
+    denominator, so the rest never enter a calculation.
+    """
+    truth, predicted = f"{label}_true", f"{label}_predicted"
+    if truth not in frame.columns or predicted not in frame.columns:
+        raise FairnessError(f"frame lacks {truth} or {predicted}")
+    if stratum not in frame.columns:
+        raise FairnessError(f"frame lacks the stratum column {stratum!r}")
+
+    positives = frame[frame[truth] == 1]
+    return {
+        "missed": (positives[predicted] == 0).to_numpy(),
+        "is_a": (positives[stratum] == levels[0]).to_numpy(),
+        "is_b": (positives[stratum] == levels[1]).to_numpy(),
+        "view": positives[view_col].to_numpy(),
+        "n": len(positives),
+    }
+
+
+def _rate(missed: np.ndarray, mask: np.ndarray) -> float:
+    """False-negative rate within a mask, or ``nan`` where the mask is empty."""
+    total = mask.sum()
+    return float(missed[mask].sum() / total) if total else float("nan")
+
+
+def _gaps_from_arrays(
+    arrays: dict, order: np.ndarray | None, reference: dict[str, float],
+) -> tuple[float, float]:
+    """Raw and standardised gaps for one (possibly resampled) ordering.
+
+    Both are computed from the same rows, which is what makes the paired bootstrap
+    paired: their correlation is carried into the interval on their difference.
+    """
+    missed = arrays["missed"] if order is None else arrays["missed"][order]
+    is_a = arrays["is_a"] if order is None else arrays["is_a"][order]
+    is_b = arrays["is_b"] if order is None else arrays["is_b"][order]
+    view = arrays["view"] if order is None else arrays["view"][order]
+
+    raw = _rate(missed, is_b) - _rate(missed, is_a)
+
+    standardised = 0.0
+    for group, sign in ((is_b, 1.0), (is_a, -1.0)):
+        total = 0.0
+        for name, weight in reference.items():
+            rate = _rate(missed, group & (view == name))
+            if np.isnan(rate):
+                return raw, float("nan")
+            total += weight * rate
+        standardised += sign * total
+    return raw, standardised
 
 
 # --------------------------------------------------------------------------- #
@@ -351,29 +420,22 @@ def delta_gap(
                                     view_col=view_col,
                                     min_positives=min_positives_for_positivity)
 
+    arrays = _as_arrays(frame, label, stratum, levels, view_col=view_col)
+    reference = reference or DEFAULT_REFERENCE_MIX
     rng = np.random.default_rng(seed)
-    n = len(frame)
+    n_positive = arrays["n"]
+
     raw_draws, std_draws, delta_draws = [], [], []
     discarded = 0
     for _ in range(replicates):
-        resample = frame.iloc[rng.integers(0, n, n)]
-        try:
-            r = group_gap(resample, label, stratum, levels).gap
-            s = standardised_gap(resample, label, stratum, levels,
-                                 reference=reference, view_col=view_col)
-        except FairnessError:  # pragma: no cover - defensive
-            discarded += 1
-            continue
-        # A replicate can lose a demographic x view cell entirely, leaving the
-        # standardised rate undefined. Those are counted rather than dropped in
-        # silence: a high discard rate means the interval rests on resamples that
-        # systematically over-represent the cells that survive.
-        if np.isnan(r) or np.isnan(s):
+        order = rng.integers(0, n_positive, n_positive)
+        r, st = _gaps_from_arrays(arrays, order, reference)
+        if np.isnan(r) or np.isnan(st):
             discarded += 1
             continue
         raw_draws.append(r)
-        std_draws.append(s)
-        delta_draws.append(r - s)
+        std_draws.append(st)
+        delta_draws.append(r - st)
 
     def interval(draws: list[float]) -> tuple[float, float]:
         if len(draws) < 100:
@@ -405,14 +467,23 @@ def bootstrap_gap_ci(
     replicates: int = 2000,
     ci: float = 0.95,
     seed: int = 42,
+    view_col: str = "view",
 ) -> tuple[float, float]:
-    """Patient bootstrap interval for a single gap."""
+    """Patient bootstrap interval for a single gap.
+
+    Resamples an index over disease-positive patients rather than the frame itself:
+    the rate has positives as its denominator, so no other row can affect it, and
+    working on arrays keeps each replicate to a few numpy operations.
+    """
+    arrays = _as_arrays(frame, label, stratum, levels, view_col=view_col)
     rng = np.random.default_rng(seed)
-    n = len(frame)
+    n_positive = arrays["n"]
+    missed, is_a, is_b = arrays["missed"], arrays["is_a"], arrays["is_b"]
+
     draws = []
     for _ in range(replicates):
-        resample = frame.iloc[rng.integers(0, n, n)]
-        gap = group_gap(resample, label, stratum, levels).gap
+        order = rng.integers(0, n_positive, n_positive)
+        gap = _rate(missed[order], is_b[order]) - _rate(missed[order], is_a[order])
         if not np.isnan(gap):
             draws.append(gap)
     if len(draws) < 100:
